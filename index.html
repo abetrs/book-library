@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Library — a minimalist reading dashboard</title>
+<meta name="description" content="A minimalist, static reading dashboard. Build a reading list and browse your Goodreads library with search, genre filters, and automatic book covers. Runs entirely in your browser." />
+<meta name="color-scheme" content="light dark" />
+<link rel="preconnect" href="https://covers.openlibrary.org" />
+<link rel="preconnect" href="https://openlibrary.org" />
+<link rel="stylesheet" href="styles.css?v=1" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">LIBRARY</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab is-active" data-tab="reading">Reading List</button>
+      <button class="tab" data-tab="goodreads">Goodreads</button>
+    </nav>
+    <div class="count" id="count"></div>
+  </header>
+
+  <div class="controls">
+    <div class="search-wrap">
+      <input id="search" type="search" placeholder="Search title or author" autocomplete="off" spellcheck="false" />
+    </div>
+    <div class="control-row">
+      <label class="field">
+        <span>Author</span>
+        <select id="authorFilter"><option value="">All</option></select>
+      </label>
+      <label class="field">
+        <span>Status</span>
+        <select id="statusFilter">
+          <option value="">All</option>
+          <option value="read">Read</option>
+          <option value="unread">Unread</option>
+          <option value="primary">Primary source</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Sort</span>
+        <select id="sortBy">
+          <option value="curated">Curated</option>
+          <option value="title">Title A–Z</option>
+          <option value="author">Author A–Z</option>
+        </select>
+      </label>
+      <label class="field toggle">
+        <span>View</span>
+        <button id="viewToggle" type="button" data-view="grid">Grid</button>
+      </label>
+    </div>
+    <div class="tagbar" id="tagbar"></div>
+  </div>
+
+  <main id="results" class="grid"></main>
+
+  <div id="empty" class="empty" hidden>
+    <p>No books match your filters.</p>
+  </div>
+
+  <!-- Goodreads import overlay content is injected when needed -->
+
+  <footer class="foot">
+    <span id="footNote"></span>
+  </footer>
+
+  <script src="data/readinglist.js?v=1"></script>
+  <script src="data/goodreads.js?v=1"></script>
+  <script src="app.js?v=1"></script>
+</body>
+</html>
