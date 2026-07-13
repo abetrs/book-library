@@ -53,10 +53,18 @@ html, body {
 }
 
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+.brand .logo { display: block; flex: none; }
+.brand span {
   font-size: 12px;
   letter-spacing: 0.42em;
   font-weight: 600;
   text-transform: uppercase;
+  /* nudge for the extra letter-spacing on the last char */
+  margin-right: -0.42em;
 }
 
 .tabs {
@@ -350,6 +358,66 @@ html, body {
   padding: 48px 32px 90px;
   text-align: center;
 }
+/* landing hero */
+.hero {
+  padding: 8px 0 44px;
+  margin-bottom: 40px;
+  border-bottom: 1px solid var(--line);
+}
+.hero-logo { color: var(--ink); margin-bottom: 18px; }
+.hero h1 {
+  font-size: 40px;
+  font-weight: 300;
+  letter-spacing: -0.02em;
+  margin: 0 0 14px;
+}
+.hero .tagline {
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: 500px;
+  margin: 0 auto 34px;
+}
+.hero .how {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 460px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.hero .how li {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 14px;
+  align-items: start;
+}
+.hero .how .step {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  border: 1px solid var(--faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.hero .how strong {
+  display: block;
+  font-weight: 500;
+  font-size: 13px;
+  margin-bottom: 3px;
+}
+.hero .how div {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
 .import h2 {
   font-size: 20px;
   font-weight: 300;

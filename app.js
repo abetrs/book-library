@@ -609,6 +609,21 @@
     els.results.className = "";
     els.results.innerHTML = `
       <section class="import">
+        <div class="hero">
+          <svg class="hero-logo" viewBox="0 0 32 32" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M16 8.5C13 6.5 8 6 4.5 7v18C8 24 13 24.5 16 26.5 19 24.5 24 24 27.5 25V7C24 6 19 6.5 16 8.5Z" />
+            <path d="M16 8.5v18" />
+          </svg>
+          <h1>Library</h1>
+          <p class="tagline">A minimalist dashboard for your reading. Build a reading list and browse your
+          Goodreads library — search, filter by genre, and see every cover. Everything runs in your
+          browser; nothing is uploaded.</p>
+          <ol class="how">
+            <li><span class="step">1</span><div><strong>Build a reading list</strong>Paste a Markdown list below, or load the sample to see how it works.</div></li>
+            <li><span class="step">2</span><div><strong>Import Goodreads</strong>Open the Goodreads tab and drop your library export CSV — genres are tagged automatically.</div></li>
+            <li><span class="step">3</span><div><strong>Search &amp; filter</strong>Filter by author, category, genre, and read status; toggle grid or list.</div></li>
+          </ol>
+        </div>
         <h2>Build your reading list</h2>
         <p>Paste a Markdown list below. Use <code>##</code> / <code>###</code> for categories and one book per line:
         <code>- Author — _Title_</code>. Add <code>✅</code> for books you've read and <code>!primary</code> for primary sources.</p>
