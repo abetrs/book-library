@@ -169,20 +169,26 @@
     }
   }, 1500);
 
-  const queue = [];
-  let active = 0;
-  const MAX = 4;
-
-  function pump() {
-    while (active < MAX && queue.length) {
-      const job = queue.shift();
-      active++;
-      job().finally(() => {
-        active--;
-        pump();
-      });
-    }
+  // Independent work queues so genre lookups never starve cover loading.
+  // (They used to share one queue; on the Goodreads tab the per-book genre jobs
+  // were enqueued first and blocked every cover.)
+  function makeQueue(max) {
+    const q = [];
+    let active = 0;
+    const pump = () => {
+      while (active < max && q.length) {
+        const job = q.shift();
+        active++;
+        job().finally(() => {
+          active--;
+          pump();
+        });
+      }
+    };
+    return { add: (job) => { q.push(job); pump(); } };
   }
+  const coverQ = makeQueue(4);
+  const genreQ = makeQueue(2);
 
   // Viewport scanner: queues covers within (or near) the viewport. Driven by
   // scroll/resize + an initial pass. Avoids IntersectionObserver, which does not
@@ -195,10 +201,9 @@
       const r = c.getBoundingClientRect();
       if (r.bottom > -margin && r.top < window.innerHeight + margin) {
         c.setAttribute("data-req", "1");
-        queue.push(() => loadCover(c));
+        coverQ.add(() => loadCover(c));
       }
     }
-    pump();
   }
   function requestScan() {
     if (scanScheduled) return;
@@ -415,9 +420,8 @@
     const need = GOODREADS.filter((b) => !b._g);
     need.forEach((b) => {
       genreJobs++;
-      queue.push(() => loadGenre(b));
+      genreQ.add(() => loadGenre(b));
     });
-    pump();
   }
 
   async function loadGenre(b) {
