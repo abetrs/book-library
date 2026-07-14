@@ -13,7 +13,10 @@ device (in `localStorage`).
 
 - **Two tabs.** A curated **Reading List** you build yourself, and your **Goodreads** library.
 - **Build your reading list** by pasting a simple Markdown list (or load the built-in sample).
-- **Import Goodreads** from the official CSV export — no scraping, one click.
+- **Import Goodreads** from the official CSV export — no scraping, one click. Re-importing later
+  **merges in only new books** (duplicates are skipped by ISBN, then title + author).
+- **Add or remove books** — add a book from the toolbar; click any book for a details popup with a
+  **summary and genres**, and a delete button.
 - **Automatic genre tags** for Goodreads books, looked up online and canonicalized into a clean,
   filterable vocabulary (History, Philosophy, Fiction, Economics, Science Fiction, …).
 - **Covers** fetched lazily from Open Library and cached locally.
@@ -74,7 +77,10 @@ The included `.nojekyll` file tells Pages to serve the files as-is (no Jekyll pr
 - Covers: Open Library Covers API (by ISBN, then title/author search).
 - Genres: Open Library subjects (ISBN → work subjects, with a title/author fallback),
   canonicalized into a curated genre list with word-boundary matching and noise filtering.
-- All state (imported lists, cover/genre caches) lives in `localStorage`.
+- Summaries: Open Library work descriptions, falling back to a Wikipedia search + summary
+  (matched on title + author) when Open Library has none.
+- Covers and genres load on separate request queues so genre lookups never block covers.
+- All state (imported lists, added/removed books, caches) lives in `localStorage`.
 
 ## License
 

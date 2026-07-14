@@ -563,17 +563,37 @@
           alert("No books found in that CSV. Make sure it's the Goodreads Library Export file.");
           return;
         }
-        GOODREADS = books.map(normalize);
-        try {
-          localStorage.setItem("goodreads.v1", JSON.stringify(GOODREADS));
-        } catch (e) {}
-        buildFilters();
-        render();
+        importGoodreadsBooks(books);
       } catch (err) {
         alert("Could not parse that CSV: " + err.message);
       }
     };
     reader.readAsText(file);
+  }
+
+  // Merge new books in, skipping any already present (by ISBN, else author+title).
+  function dedupeKey(b) {
+    const isbn = (b.isbn || "").replace(/[^0-9Xx]/g, "");
+    return isbn ? "i:" + isbn : "t:" + (b.author + "|" + b.title).toLowerCase().trim();
+  }
+  function importGoodreadsBooks(books) {
+    const seen = new Set(GOODREADS.map(dedupeKey));
+    let id = nextId(GOODREADS);
+    let added = 0;
+    for (const nb of books) {
+      const k = dedupeKey(nb);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const n = normalize(nb, id);
+      id++;
+      GOODREADS.push(n);
+      added++;
+    }
+    persistGoodreads();
+    buildFilters();
+    render();
+    const dup = books.length - added;
+    toast(added ? `Added ${added} new · ${dup} already in your library` : `Nothing new · ${dup} already in your library`);
   }
 
   function loadStoredGoodreads() {
@@ -875,6 +895,7 @@
     state.tab = btn.dataset.tab;
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("is-active", t === btn));
     resetFiltersForTab();
+    updateActionButtons();
     buildFilters();
     render();
   });
@@ -921,7 +942,285 @@
     return escapeHtml(s).replace(/"/g, "&quot;");
   }
 
+  /* ---------------- data mutations (add / delete) ---------------- */
+  function persist() {
+    if (state.tab === "reading") {
+      try { localStorage.setItem("readinglist.v1", JSON.stringify(READING)); } catch (e) {}
+    } else {
+      persistGoodreads();
+    }
+  }
+  function persistGoodreads() {
+    try { localStorage.setItem("goodreads.v1", JSON.stringify(GOODREADS)); } catch (e) {}
+  }
+  function nextId(arr) {
+    return arr.reduce((m, b) => Math.max(m, b.id || 0), -1) + 1;
+  }
+  function bookById(id) {
+    return currentData().find((b) => String(b.id) === String(id));
+  }
+  function deleteBook(id) {
+    const arr = currentData();
+    const i = arr.findIndex((b) => String(b.id) === String(id));
+    if (i < 0) return;
+    const [removed] = arr.splice(i, 1);
+    persist();
+    buildFilters();
+    render();
+    toast(`Removed “${removed.title}”`);
+  }
+  function addBookToCurrent(data) {
+    const arr = currentData();
+    const b = normalize(data, nextId(arr));
+    arr.unshift(b);
+    persist();
+    buildFilters();
+    render();
+    toast(`Added “${b.title}”`);
+  }
+
+  /* ---------------- book summaries (Open Library work descriptions) ---------------- */
+  const DESC_KEY = "descCache.v1";
+  let descCache = {};
+  try { descCache = JSON.parse(localStorage.getItem(DESC_KEY) || "{}"); } catch (e) { descCache = {}; }
+  let descDirty = false;
+  setInterval(() => {
+    if (descDirty) {
+      try { localStorage.setItem(DESC_KEY, JSON.stringify(descCache)); } catch (e) {}
+      descDirty = false;
+    }
+  }, 1500);
+
+  async function getDescription(b) {
+    const k = genreKey(b);
+    if (descCache[k] !== undefined) return descCache[k];
+    const d = await resolveDescription(b);
+    descCache[k] = d;
+    descDirty = true;
+    return d;
+  }
+  async function resolveDescription(b) {
+    let workKey = null;
+    const isbn = (b.isbn || "").replace(/[^0-9Xx]/g, "");
+    if (isbn) {
+      try {
+        const e = await fetch(`https://openlibrary.org/isbn/${isbn}.json`);
+        if (e.ok) { const ed = await e.json(); workKey = ed.works && ed.works[0] && ed.works[0].key; }
+      } catch (e) {}
+    }
+    if (!workKey) {
+      try {
+        const p = new URLSearchParams({ title: b.title, limit: "1", fields: "key" });
+        if (b.author) p.set("author", b.author);
+        const r = await fetch(`https://openlibrary.org/search.json?${p}`);
+        if (r.ok) { const j = await r.json(); workKey = j.docs && j.docs[0] && j.docs[0].key; }
+      } catch (e) {}
+    }
+    if (workKey) {
+      try {
+        const w = await fetch(`https://openlibrary.org${workKey}.json`);
+        if (w.ok) {
+          const wj = await w.json();
+          let d = wj.description;
+          if (d && typeof d === "object") d = d.value;
+          if (typeof d === "string" && d.trim()) return cleanDesc(d);
+        }
+      } catch (e) {}
+    }
+    // fallback: Wikipedia (searched with title + author to land on the right page)
+    const wiki = await wikiSummary(b.title, b.author);
+    return wiki ? cleanDesc(wiki) : "";
+  }
+  async function wikiSummary(title, author) {
+    try {
+      const q = encodeURIComponent(`${title} ${author || ""}`.trim());
+      const s = await fetch(
+        `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&srlimit=1&format=json&origin=*`
+      );
+      if (!s.ok) return "";
+      const sj = await s.json();
+      const hit = sj.query && sj.query.search && sj.query.search[0];
+      if (!hit) return "";
+      const r = await fetch(
+        `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(hit.title)}`
+      );
+      if (!r.ok) return "";
+      const rj = await r.json();
+      if (rj.type === "disambiguation") return "";
+      return rj.extract || "";
+    } catch (e) {
+      return "";
+    }
+  }
+  function cleanDesc(s) {
+    s = s.replace(/\r/g, "").trim();
+    s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1"); // flatten [text](url)
+    s = s.replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1"); // flatten [text][ref]
+    s = s.replace(/^\s*(?:from\s+wikipedia|source)\s*[:.]?\s*/i, ""); // strip boilerplate lead-in
+    s = s.split(/\n-{3,}/)[0]; // drop content after a horizontal rule
+    s = s.replace(/\n\[\d+\]:\s*\S+/g, ""); // drop reference-link definitions
+    s = s.replace(/\(\s*(?:source|see also)[^)]*\)\s*$/i, "").trim(); // drop trailing source note
+    s = s.replace(/\\([[\]*_])/g, "$1"); // unescape markdown-escaped chars
+    s = s.replace(/\*{1,2}([^*\n]+)\*{1,2}/g, "$1"); // strip *emphasis* / **bold**
+    s = s.replace(/\n{3,}/g, "\n\n").trim();
+    if (s.length > 900) s = s.slice(0, 900).replace(/\s+\S*$/, "") + "…";
+    return s;
+  }
+
+  /* ---------------- modal (detail popup + add form) ---------------- */
+  let modalBookId = null;
+  function closeModal() {
+    modalBookId = null;
+    document.getElementById("modalHost").innerHTML = "";
+    document.removeEventListener("keydown", escClose);
+  }
+  function escClose(e) { if (e.key === "Escape") closeModal(); }
+  function openModal(inner) {
+    const host = document.getElementById("modalHost");
+    host.innerHTML =
+      `<div class="overlay" id="overlay"><div class="modal" role="dialog" aria-modal="true">` +
+      `<button class="modal-close" aria-label="Close">×</button>${inner}</div></div>`;
+    const overlay = host.querySelector(".overlay");
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(); });
+    host.querySelector(".modal-close").addEventListener("click", closeModal);
+    document.addEventListener("keydown", escClose);
+  }
+
+  function openDetail(id) {
+    const b = bookById(id);
+    if (!b) return;
+    modalBookId = b.id;
+    const tags = b.genres && b.genres.length ? b.genres : [b.category, b.subcategory].filter(Boolean);
+    const meta = [b.read ? "✓ Read" : "Unread"];
+    if (b.primary) meta.push("Primary source");
+    if (b.rating) meta.push("★ " + b.rating + "/5");
+    openModal(`
+      <div class="detail">
+        <div class="d-cover" id="dCover"><div class="fallback"><div class="ft">${escapeHtml(b.title)}</div></div></div>
+        <div class="d-info">
+          <h3>${escapeHtml(b.title)}</h3>
+          <div class="d-author">${escapeHtml(b.author || "Unknown author")}</div>
+          <div class="d-tags" id="dTags">${tags.map((t) => `<span class="d-tag">${escapeHtml(t)}</span>`).join("")}</div>
+          <div class="d-meta">${meta.map((m) => `<span>${escapeHtml(m)}</span>`).join("")}</div>
+        </div>
+        <div class="d-summary muted" id="dSummary">Loading summary…</div>
+        <div class="d-actions"><button class="btn-danger" id="dDelete">Delete book</button></div>
+      </div>`);
+    setDetailCover(document.getElementById("dCover"), b);
+    document.getElementById("dDelete").addEventListener("click", () => { closeModal(); deleteBook(id); });
+    loadDetailExtras(b);
+  }
+
+  async function setDetailCover(cov, b) {
+    if (!cov) return;
+    const key = keyFor(b.author, b.title);
+    let url = cache[key];
+    if (url === undefined) {
+      url = await resolveCover(b.title, b.author, (b.isbn || "").replace(/[^0-9Xx]/g, ""));
+      cache[key] = url;
+      cacheDirty = true;
+    }
+    if (url && modalBookId === b.id) {
+      const im = new Image();
+      im.alt = "";
+      im.addEventListener("load", () => { if (modalBookId === b.id) { cov.innerHTML = ""; cov.appendChild(im); } });
+      im.src = url;
+    }
+  }
+
+  async function loadDetailExtras(b) {
+    const needGenres = !(b.genres && b.genres.length);
+    const [desc, genres] = await Promise.all([
+      getDescription(b),
+      needGenres ? resolveGenres(b) : Promise.resolve(b.genres || []),
+    ]);
+    if (modalBookId !== b.id) return; // modal closed or switched
+    if (needGenres && genres.length) {
+      b.genres = genres;
+      const base = state.tab === "reading" ? [b.category, b.subcategory].filter(Boolean) : [];
+      const all = [...new Set([...base, ...genres])];
+      const tagsEl = document.getElementById("dTags");
+      if (tagsEl) tagsEl.innerHTML = all.map((t) => `<span class="d-tag">${escapeHtml(t)}</span>`).join("");
+    }
+    const sEl = document.getElementById("dSummary");
+    if (sEl) {
+      if (desc) { sEl.textContent = desc; sEl.classList.remove("muted"); }
+      else { sEl.textContent = "No summary found for this edition."; }
+    }
+  }
+
+  function openAddForm() {
+    const gr = state.tab === "goodreads";
+    openModal(`
+      <form class="mform" id="addForm">
+        <h3>Add a book${gr ? " to your Goodreads library" : " to your reading list"}</h3>
+        <label>Title<input type="text" id="fTitle" required autocomplete="off" spellcheck="false" /></label>
+        <label>Author<input type="text" id="fAuthor" autocomplete="off" spellcheck="false" /></label>
+        <label>ISBN <span style="text-transform:none;letter-spacing:normal;color:var(--faint)">— optional, improves cover &amp; genres</span><input type="text" id="fIsbn" autocomplete="off" spellcheck="false" /></label>
+        ${gr
+          ? `<label>Shelf<select id="fShelf"><option value="read">Read</option><option value="to-read">To Read</option><option value="currently-reading">Currently Reading</option></select></label>`
+          : `<label>Category<input type="text" id="fCat" placeholder="e.g. Philosophy" autocomplete="off" spellcheck="false" /></label>
+             <label class="row-check"><input type="checkbox" id="fRead" /> I've read this</label>`}
+        <div class="mform-actions">
+          <button type="button" class="btn-ghost" id="fCancel">Cancel</button>
+          <button type="submit" class="btn-primary">Add book</button>
+        </div>
+      </form>`);
+    document.getElementById("fCancel").addEventListener("click", closeModal);
+    document.getElementById("addForm").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const title = document.getElementById("fTitle").value.trim();
+      if (!title) return;
+      const author = document.getElementById("fAuthor").value.trim();
+      const isbn = document.getElementById("fIsbn").value.replace(/[^0-9Xx]/g, "");
+      let data;
+      if (gr) {
+        const shelf = document.getElementById("fShelf").value;
+        data = { title, author, isbn, category: prettyShelf(shelf), read: shelf === "read", rating: 0 };
+      } else {
+        const category = document.getElementById("fCat").value.trim() || "Uncategorized";
+        data = { title, author, isbn, category, read: document.getElementById("fRead").checked, primary: false };
+      }
+      closeModal();
+      addBookToCurrent(data);
+    });
+    setTimeout(() => { const t = document.getElementById("fTitle"); if (t) t.focus(); }, 30);
+  }
+
+  /* ---------------- toast ---------------- */
+  let toastT;
+  function toast(msg) {
+    const t = document.getElementById("toast");
+    if (!t) return;
+    t.textContent = msg;
+    t.hidden = false;
+    void t.offsetWidth; // force reflow so the transition plays
+    t.classList.add("show");
+    clearTimeout(toastT);
+    toastT = setTimeout(() => {
+      t.classList.remove("show");
+      setTimeout(() => { t.hidden = true; }, 250);
+    }, 2600);
+  }
+
+  /* ---------------- action buttons + card clicks ---------------- */
+  function updateActionButtons() {
+    document.getElementById("importMore").hidden = state.tab !== "goodreads";
+  }
+  document.getElementById("addBook").addEventListener("click", openAddForm);
+  const importMoreInput = document.getElementById("importMoreInput");
+  document.getElementById("importMore").addEventListener("click", () => importMoreInput.click());
+  importMoreInput.addEventListener("change", () => {
+    if (importMoreInput.files[0]) importCsv(importMoreInput.files[0]);
+    importMoreInput.value = "";
+  });
+  els.results.addEventListener("click", (e) => {
+    const card = e.target.closest(".card");
+    if (card && card.dataset.id != null) openDetail(card.dataset.id);
+  });
+
   /* ---------------- boot ---------------- */
+  updateActionButtons();
   buildFilters();
   render();
 })();

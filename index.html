@@ -57,9 +57,14 @@
         <span>View</span>
         <button id="viewToggle" type="button" data-view="grid">Grid</button>
       </label>
+      <div class="field-actions">
+        <button id="importMore" type="button" class="act-btn" hidden>Import CSV</button>
+        <button id="addBook" type="button" class="act-btn act-add">+ Add book</button>
+      </div>
     </div>
     <div class="tagbar" id="tagbar"></div>
   </div>
+  <input type="file" id="importMoreInput" accept=".csv,text/csv" hidden />
 
   <main id="results" class="grid"></main>
 
@@ -73,8 +78,11 @@
     <span id="footNote"></span>
   </footer>
 
-  <script src="data/readinglist.js?v=3"></script>
-  <script src="data/goodreads.js?v=3"></script>
-  <script src="app.js?v=3"></script>
+  <div id="modalHost"></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="data/readinglist.js?v=9"></script>
+  <script src="data/goodreads.js?v=9"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>
