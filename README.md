@@ -42,6 +42,9 @@ you can read on GitHub and edit by hand.
 - **Section headers stay headers.** When importing Markdown, `#` headings, bold lines
   (`**Poetry**`), bold bullets (`- **Poetry**`), bullets ending in a colon (`- Poetry:`), and bullets
   with nested bullets under them are treated as categories, never as books.
+- **Clear library** (footer) — wipe everything, just the Reading List, or just Goodreads. It
+  offers a backup download first, then asks you to type `delete N books` and waits out a 5-second
+  countdown before the delete button works.
 - **Remove books** — click any book for a details popup with a **summary**, genres, its Dewey
   number, and a delete button.
 - **Covers** fetched lazily from Open Library and cached locally.

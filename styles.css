@@ -886,3 +886,14 @@ button.pk-row:hover { background: var(--chip-bg); }
 .cand-txt span { font-size: 12px; }
 .mform input.bad { border-bottom-color: #c0392b; }
 @media (max-width: 620px) { .st-grid { grid-template-columns: 1fr; } }
+
+/* ---------- clear library ---------- */
+.store-btn.danger:hover { color: #c0392b; border-color: #c0392b; }
+.clear-dlg code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11.5px; background: var(--chip-bg); padding: 1px 5px; border-radius: 3px; text-transform: none; letter-spacing: normal; }
+.clear-dlg .st-err { font-size: 13px; line-height: 1.55; color: #c0392b; margin: 0 0 16px; }
+.clear-dlg .muted { color: var(--muted); }
+.clr-scope { margin: 14px 0 6px; }
+.clr-scope .row-check { margin-bottom: 10px; }
+.clear-dlg .btn-danger:not(:disabled) { border-color: #c0392b; color: #c0392b; }
+.clear-dlg .btn-danger:not(:disabled):hover { background: #c0392b; color: #fff; }
+.clear-dlg .btn-danger.armed-off, .clear-dlg .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }

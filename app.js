@@ -1466,6 +1466,91 @@
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
+  /* ---------------- clear library (deliberately hard to do by accident) ---------------- */
+  function openClearDialog() {
+    const counts = { reading: READING.length, goodreads: GOODREADS.length };
+    const total = counts.reading + counts.goodreads;
+    if (!total) return toast("Your library is already empty");
+    const opt = (v, label, n, checked) =>
+      `<label class="row-check"><input type="radio" name="clrScope" value="${v}" ${checked ? "checked" : ""} ${n ? "" : "disabled"} /> ${label} <span class="muted">(${n} book${n === 1 ? "" : "s"})</span></label>`;
+    openModal(`
+      <div class="mform clear-dlg">
+        <h3>Clear library</h3>
+        <p class="pk-hint">This permanently removes books from <code>library.md</code>.${
+          store.backend.kind === "github"
+            ? " The change is committed to GitHub — the only way back is the repo's history."
+            : store.backend.kind === "local"
+            ? " The file on disk is overwritten — the only way back is git (if you committed) or a backup."
+            : " (Read-only here, so this only clears what's on screen until you reload.)"
+        }</p>
+        <div class="clr-scope">
+          ${opt("all", "Everything", total, true)}
+          ${opt("reading", "Only the Reading List", counts.reading, false)}
+          ${opt("goodreads", "Only the Goodreads library", counts.goodreads, false)}
+        </div>
+        <p class="pk-hint">Download a backup first — you can bring it back with <strong>Import list</strong> or by restoring the file.</p>
+        <div class="mform-actions">
+          <button type="button" class="btn-ghost" id="clrBackup">Download backup</button>
+          <button type="button" class="btn-ghost" id="clrCancel">Cancel</button>
+          <button type="button" class="btn-danger" id="clrNext">Continue…</button>
+        </div>
+      </div>`);
+    document.getElementById("clrBackup").addEventListener("click", downloadLibrary);
+    document.getElementById("clrCancel").addEventListener("click", closeModal);
+    document.getElementById("clrNext").addEventListener("click", () => {
+      const scope = document.querySelector('#modalHost input[name="clrScope"]:checked').value;
+      confirmClear(scope, scope === "all" ? total : counts[scope]);
+    });
+  }
+
+  // Second step: type a phrase, then wait out a short countdown before the button arms.
+  function confirmClear(scope, n) {
+    const what = { all: "your entire library", reading: "your Reading List", goodreads: "your Goodreads library" }[scope];
+    const phrase = `delete ${n} book${n === 1 ? "" : "s"}`;
+    openModal(`
+      <div class="mform clear-dlg">
+        <h3>Are you really sure?</h3>
+        <p class="st-err">You're about to delete ${what}: <strong>${n} book${n === 1 ? "" : "s"}</strong>, with their Dewey numbers, ratings and notes.</p>
+        <label>Type <code>${phrase}</code> to confirm<input type="text" id="clrPhrase" autocomplete="off" spellcheck="false" /></label>
+        <div class="mform-actions">
+          <button type="button" class="btn-ghost" id="clrCancel">Cancel — keep my books</button>
+          <button type="button" class="btn-danger armed-off" id="clrGo" disabled>Delete ${n} book${n === 1 ? "" : "s"}</button>
+        </div>
+      </div>`);
+    const inp = document.getElementById("clrPhrase");
+    const go = document.getElementById("clrGo");
+    let wait = 5;
+    const label = go.textContent;
+    const update = () => {
+      const typed = inp.value.trim().toLowerCase() === phrase;
+      go.disabled = !(typed && wait <= 0);
+      go.classList.toggle("armed-off", go.disabled);
+      go.textContent = typed && wait > 0 ? `${label} (${wait})` : label;
+    };
+    const tick = setInterval(() => {
+      if (!document.getElementById("clrGo")) return clearInterval(tick);
+      wait--;
+      update();
+      if (wait <= 0) clearInterval(tick);
+    }, 1000);
+    inp.addEventListener("input", update);
+    document.getElementById("clrCancel").addEventListener("click", closeModal);
+    go.addEventListener("click", () => {
+      if (go.disabled) return;
+      if (scope !== "goodreads") READING = [];
+      if (scope !== "reading") GOODREADS = [];
+      Object.assign(state, { q: "", ddc: "", author: "", status: "" });
+      els.search.value = "";
+      els.statusFilter.value = "";
+      closeModal();
+      persist({ all: "Clear library", reading: "Clear Reading List", goodreads: "Clear Goodreads library" }[scope], 0);
+      buildFilters();
+      render();
+      toast(`Deleted ${n} book${n === 1 ? "" : "s"}`);
+    });
+    setTimeout(() => inp.focus(), 30);
+  }
+
   function openStorageDialog() {
     const kind = store.backend.kind;
     const cfg = { ...LibraryStore.githubDefaults(), ...(LibraryStore.githubSettings() || {}) };
@@ -2404,6 +2489,7 @@
 
   /* ---------------- boot ---------------- */
   document.getElementById("storeBtn").addEventListener("click", openStorageDialog);
+  document.getElementById("clearBtn").addEventListener("click", openClearDialog);
   els.sortBy.value = state.sort;
   (async () => {
     const opened = await LibraryStore.open();
