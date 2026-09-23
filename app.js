@@ -1,21 +1,22 @@
 /* Library — minimalist reading dashboard
  * Two datasets: window.READING_LIST (curated) and window.GOODREADS (imported CSV).
- * Covers are fetched lazily from Open Library and cached in localStorage.
+ * Books are organized by Dewey Decimal Classification (window.DEWEY). Covers,
+ * DDC numbers and genres are fetched lazily from Open Library and cached in localStorage.
  */
 (() => {
   "use strict";
 
-  let READING = loadStoredReading() || (window.READING_LIST || []).map(normalize);
-  let GOODREADS = loadStoredGoodreads() || (window.GOODREADS || []).map(normalize);
+  const DEWEY = window.DEWEY;
+  let READING = [];
+  let GOODREADS = [];
 
   const state = {
     tab: "reading",
     q: "",
+    ddc: "", // Dewey query: "8", "82", "8238" (prefix digits), "300-399", or "none"
     author: "",
     status: "",
-    category: "",
-    genre: "",
-    sort: "curated",
+    sort: "ddc",
     view: "grid",
   };
 
@@ -24,6 +25,7 @@
     count: document.getElementById("count"),
     empty: document.getElementById("empty"),
     search: document.getElementById("search"),
+    ddcInput: document.getElementById("ddcInput"),
     authorFilter: document.getElementById("authorFilter"),
     statusFilter: document.getElementById("statusFilter"),
     sortBy: document.getElementById("sortBy"),
@@ -34,6 +36,7 @@
   };
 
   function normalize(b, i) {
+    const ddc = cleanDdc(b.ddc);
     return {
       id: b.id != null ? b.id : i,
       title: b.title || "",
@@ -46,6 +49,8 @@
       rating: b.rating || 0,
       isbn: b.isbn || "",
       note: b.note || "",
+      ddc: ddc || "",
+      ddcSrc: ddc ? b.ddcSrc || "manual" : "", // "ol" (catalog) | "est" (estimated) | "manual"
     };
   }
 
@@ -54,35 +59,53 @@
   }
 
   /* ---------------- filtering ---------------- */
-  function apply() {
+  function apply(asText = false) {
     const data = currentData();
-    const q = state.q.trim().toLowerCase();
+    let q = state.q.trim().toLowerCase();
+    // A Dewey number typed straight into the main search box searches by class
+    // (falling back to plain text, so a title like "1984" or "451" still works).
+    const qDdc = !asText && looksLikeDdc(q) ? parseDdcQuery(q) : null;
+    if (qDdc) q = "";
+    const fDdc = parseDdcQuery(state.ddc);
     let out = data.filter((b) => {
-      if (state.tab === "reading") {
-        if (state.category && b.category !== state.category) return false;
-      } else {
-        if (state.genre && !(b.genres || []).includes(state.genre)) return false;
-      }
+      if (fDdc && !ddcMatches(b.ddc, fDdc)) return false;
+      if (qDdc && !ddcMatches(b.ddc, qDdc)) return false;
       if (state.author && b.author !== state.author) return false;
       if (state.status === "read" && !b.read) return false;
       if (state.status === "unread" && b.read) return false;
       if (state.status === "primary" && !b.primary) return false;
       if (q) {
-        const hay = (b.title + " " + b.author + " " + b.category + " " + b.subcategory).toLowerCase();
+        const hay = [b.title, b.author, b.category, b.subcategory, (b.genres || []).join(" "), b.ddc, ddcLabel(b.ddc)]
+          .join(" ")
+          .toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
+    if (qDdc && !out.length) return apply(true);
 
-    if (state.sort === "title") out = out.slice().sort((a, b) => a.title.localeCompare(b.title));
+    if (state.sort === "ddc") out = out.slice().sort(compareShelf);
+    else if (state.sort === "title") out = out.slice().sort((a, b) => a.title.localeCompare(b.title));
     else if (state.sort === "author")
       out = out.slice().sort((a, b) => (a.author || "￿").localeCompare(b.author || "￿"));
 
     return out;
   }
 
+  // Shelf order: Dewey number digit by digit, then author surname, then title.
+  // Unclassified books go last.
+  function compareShelf(a, b) {
+    if (a.ddc !== b.ddc) {
+      if (!a.ddc) return 1;
+      if (!b.ddc) return -1;
+      return a.ddc < b.ddc ? -1 : 1; // fixed 3-digit integer part => string order is shelf order
+    }
+    return surname(a.author).localeCompare(surname(b.author)) || a.title.localeCompare(b.title);
+  }
+
   /* ---------------- rendering ---------------- */
   function render() {
+    updateActionButtons();
     // Reading list empty -> import panel
     if (state.tab === "reading" && READING.length === 0) {
       renderReadingImport();
@@ -104,13 +127,29 @@
     els.empty.hidden = list.length !== 0;
 
     const frag = document.createDocumentFragment();
-    list.forEach((b, i) => frag.appendChild(card(b, i)));
+    let shelf = null;
+    list.forEach((b, i) => {
+      // In shelf order, head each Dewey division (e.g. "820 English & Old English literatures").
+      if (state.sort === "ddc") {
+        const div = b.ddc ? b.ddc.slice(0, 2) : "";
+        if (div !== shelf) {
+          shelf = div;
+          const h = document.createElement("h4");
+          h.className = "shelf-head";
+          h.innerHTML = div
+            ? `<span class="sh-n">${div}0</span>${escapeHtml(divisionLabel(div))}<span class="sh-c">${escapeHtml(DEWEY.MAIN[div[0]])}</span>`
+            : `<span class="sh-n">—</span>Not yet classified`;
+          frag.appendChild(h);
+        }
+      }
+      frag.appendChild(card(b, i));
+    });
     els.results.appendChild(frag);
 
     observeCovers();
     updateChrome(list, currentData());
 
-    if (state.tab === "goodreads" && GOODREADS.length) ensureGenres();
+    ensureClassified();
   }
 
   function updateChrome(list, data) {
@@ -144,11 +183,8 @@
   }
 
   function cardTag(b) {
-    if (state.tab === "goodreads") {
-      if (b.genres && b.genres.length) return b.genres.join(" · ");
-      return b._g ? b.category : "…";
-    }
-    return b.subcategory || b.category;
+    if (b.ddc) return `${b.ddc}${b.ddcSrc === "est" ? "~" : ""} · ${ddcLabel(b.ddc)}`;
+    return b._c ? "Unclassified" : "Classifying…";
   }
 
   /* ---------------- covers (Open Library, lazy + cached) ---------------- */
@@ -169,7 +205,7 @@
     }
   }, 1500);
 
-  // Independent work queues so genre lookups never starve cover loading.
+  // Independent work queues so classification lookups never starve cover loading.
   // (They used to share one queue; on the Goodreads tab the per-book genre jobs
   // were enqueued first and blocked every cover.)
   function makeQueue(max) {
@@ -188,7 +224,7 @@
     return { add: (job) => { q.push(job); pump(); } };
   }
   const coverQ = makeQueue(4);
-  const genreQ = makeQueue(2);
+  const classQ = makeQueue(2);
 
   // Viewport scanner: queues covers within (or near) the viewport. Driven by
   // scroll/resize + an initial pass. Avoids IntersectionObserver, which does not
@@ -290,24 +326,114 @@
     img.src = url;
   }
 
-  /* ---------------- genres (Goodreads tab) ----------------
-   * Raw subjects come from Open Library (ISBN -> work subjects, else title/author
-   * search) and are canonicalized into a small, clean, filterable vocabulary.
-   */
-  const GENRE_CACHE_KEY = "genreCache.v2";
-  let genreCache = {};
-  try {
-    genreCache = JSON.parse(localStorage.getItem(GENRE_CACHE_KEY) || "{}");
-  } catch (e) {
-    genreCache = {};
+  /* ---------------- Dewey Decimal helpers ---------------- */
+  // Catalog DDC strings come in many shapes: "823/.8", "891.73/3", "320.5/32 21",
+  // "[Fic]", "B". Keep the digits (prime marks removed), drop the edition suffix.
+  function cleanDdc(raw) {
+    if (raw == null) return null;
+    const s = String(raw).replace(/[[\]'’/]/g, "").trim();
+    const m = s.match(/^(\d{3})(?:\.(\d+))?/);
+    if (!m) return null;
+    const dec = (m[2] || "").replace(/0+$/, "");
+    return dec ? `${m[1]}.${dec}` : m[1];
   }
-  let genreDirty = false;
+
+  function sectionLabel(n3) {
+    const arr = DEWEY.SECTIONS[n3.slice(0, 2)];
+    return (arr && arr[+n3[2]]) || "";
+  }
+  function divisionLabel(n2) {
+    const arr = DEWEY.SECTIONS[n2];
+    return (arr && arr[0]) || "";
+  }
+  // Most specific heading we know for a number (section, else division, else class).
+  function ddcLabel(ddc) {
+    if (!ddc) return "";
+    return sectionLabel(ddc.slice(0, 3)) || divisionLabel(ddc.slice(0, 2)) || DEWEY.MAIN[ddc[0]] || "";
+  }
+  // Hierarchy for a number: class › division › section (› the full number).
+  function ddcPath(ddc) {
+    if (!ddc) return [];
+    const out = [{ code: ddc[0] + "00", p: ddc[0], label: DEWEY.MAIN[ddc[0]] }];
+    const div = divisionLabel(ddc.slice(0, 2));
+    if (div && ddc[1] !== "0") out.push({ code: ddc.slice(0, 2) + "0", p: ddc.slice(0, 2), label: div });
+    const sec = sectionLabel(ddc.slice(0, 3));
+    if (sec && ddc[2] !== "0") out.push({ code: ddc.slice(0, 3), p: ddc.slice(0, 3), label: sec });
+    return out;
+  }
+
+  // Dewey queries. Prefix digits carry the hierarchy: "8" = 800s, "82" = 820s,
+  // "823" = 823, "8238" = 823.8 and everything under it.
+  function looksLikeDdc(q) {
+    return /^(\d{1,3}(\.\d*)?|\d{1,2}[x*]{1,2}|\d{1,3}(\.\d+)?\s*[-–]\s*\d{1,3}(\.\d+)?)$/i.test(q.trim());
+  }
+  function parseDdcQuery(q) {
+    q = String(q || "").trim().toLowerCase();
+    if (!q) return null;
+    if (q === "none") return { type: "none" };
+    let m = q.match(/^(\d{1,3}(?:\.\d+)?)\s*[-–]\s*(\d{1,3}(?:\.\d+)?)$/);
+    if (m) {
+      const lo = parseFloat(m[1].padEnd(3, "0")),
+        hiRaw = m[2].includes(".") ? m[2] : m[2].padEnd(3, "9");
+      const hi = parseFloat(hiRaw);
+      return { type: "range", lo: Math.min(lo, hi), hi: Math.max(lo, hi), inclusiveTail: !m[2].includes(".") };
+    }
+    m = q.match(/^(\d{1,3})[x*]*(?:\.(\d*))?$/);
+    if (!m) return null;
+    let int = m[1];
+    const dec = m[2] || "";
+    // "800" means the 800s and "820" the 820s — trailing zeros mark a broader class
+    // (unless decimals follow: "800.1" is literal).
+    // "800." / "80x" pin the exact section / division.
+    if (!dec && int.length === 3 && !/[x*.]/.test(q)) int = int.replace(/0+$/, "") || "0";
+    if (dec && int.length < 3) int = int.padEnd(3, "0");
+    return { type: "prefix", p: int + dec };
+  }
+  function ddcMatches(ddc, f) {
+    if (!f) return true;
+    if (f.type === "none") return !ddc;
+    if (!ddc) return false;
+    if (f.type === "prefix") return ddc.replace(".", "").startsWith(f.p);
+    const v = parseFloat(ddc);
+    return v >= f.lo && (f.inclusiveTail ? v < Math.floor(f.hi) + 1 : v <= f.hi);
+  }
+  // prefix digits -> human notation ("8" -> "800", "82" -> "820", "8238" -> "823.8")
+  function prefixDisplay(p) {
+    if (p.length <= 3) return p.padEnd(3, "0");
+    return p.slice(0, 3) + "." + p.slice(3);
+  }
+  // prefix digits -> a query string that parses back to the same prefix
+  // ("8" -> "800", "82" -> "820", "80" -> "80x", "320" -> "320.", "8917" -> "891.7")
+  function prefixQuery(p) {
+    if (p.length === 1) return p + "00";
+    if (p.length === 2) return p[1] === "0" ? p + "x" : p + "0";
+    if (p.length === 3) return p.endsWith("0") ? p + "." : p;
+    return prefixDisplay(p);
+  }
+
+
+  /* ---------------- classification (Dewey number + genres) ----------------
+   * One Open Library lookup per book yields both:
+   *  - the Dewey number from library catalog records (edition `dewey_decimal_class`,
+   *    search `ddc`), picking the most-cited section and its most detailed form;
+   *  - raw subjects, canonicalized into a small genre vocabulary.
+   * Books with no catalog number get an estimate from subjects/genres/category
+   * (marked "~"); any number can be overridden by hand.
+   */
+  const CLASS_CACHE_KEY = "classCache.v1";
+  let classCache = {};
+  try {
+    classCache = JSON.parse(localStorage.getItem(CLASS_CACHE_KEY) || "{}");
+  } catch (e) {
+    classCache = {};
+  }
+  let classDirty = false;
   setInterval(() => {
-    if (genreDirty) {
+    if (classDirty) {
       try {
-        localStorage.setItem(GENRE_CACHE_KEY, JSON.stringify(genreCache));
+        localStorage.setItem(CLASS_CACHE_KEY, JSON.stringify(classCache));
       } catch (e) {}
-      genreDirty = false;
+      classDirty = false;
     }
   }, 1500);
 
@@ -368,110 +494,365 @@
     return isbn ? "i:" + isbn : "t:" + (b.author + "|" + b.title).toLowerCase().trim();
   }
 
-  async function resolveGenres(b) {
+  // Pick a catalog number: the section (first 3 digits) cited most across records,
+  // then the most detailed number that refines the best-supported one.
+  function pickDdc(cands) {
+    if (!cands.length) return null;
+    const secW = {};
+    const numW = {};
+    for (const { n, w } of cands) {
+      secW[n.slice(0, 3)] = (secW[n.slice(0, 3)] || 0) + w;
+      numW[n] = (numW[n] || 0) + w;
+    }
+    const sec = Object.keys(secW).sort((a, b) => secW[b] - secW[a])[0];
+    const inSec = Object.keys(numW).filter((n) => n.startsWith(sec));
+    inSec.sort((a, b) => numW[b] - numW[a] || b.length - a.length);
+    const top = inSec[0];
+    const refined = inSec.filter((n) => n.startsWith(top)).sort((a, b) => b.length - a.length)[0];
+    return refined || top;
+  }
+
+  // --- estimation (no catalog number found) ---
+  // Literature is classed by original language, then form: 8 + language + form digit.
+  const LIT_LANG = [
+    [/^american|^united states/i, "81"], [/^(english|british|irish|scottish|welsh|australian|new zealand)/i, "82"],
+    [/^canadian/i, "81"], [/^(german|austrian|swiss)/i, "83"], [/^french|^belgian/i, "84"], [/^italian/i, "85"],
+    [/^(spanish|latin american|mexican|argentine|colombian|chilean|cuban|peruvian)/i, "86"],
+    [/^(portuguese|brazilian)/i, "869"], [/^latin\b/i, "87"], [/^(greek|classical greek)/i, "88"],
+    [/^modern greek/i, "889"], [/^russian/i, "891.7"], [/^ukrainian/i, "891.79"], [/^polish/i, "891.85"],
+    [/^czech/i, "891.86"], [/^(persian|iranian)/i, "891.55"], [/^hindi/i, "891.43"], [/^urdu/i, "891.439"],
+    [/^bengali/i, "891.44"], [/^sanskrit/i, "891.2"], [/^(irish gaelic|gaelic)/i, "891.6"], [/^yiddish/i, "839.1"],
+    [/^swedish/i, "839.7"], [/^danish/i, "839.81"], [/^norwegian/i, "839.82"], [/^icelandic|^old norse/i, "839.6"],
+    [/^dutch|^flemish/i, "839.31"], [/^hebrew|^israeli/i, "892.4"], [/^arabic/i, "892.7"], [/^turkish/i, "894.35"],
+    [/^chinese/i, "895.1"], [/^japanese/i, "895.6"], [/^korean/i, "895.7"], [/^vietnamese/i, "895.92"],
+  ];
+  const LANG_CODE = {
+    eng: "82", ger: "83", fre: "84", ita: "85", spa: "86", por: "869", lat: "87", grc: "88", gre: "889",
+    rus: "891.7", ukr: "891.79", pol: "891.85", cze: "891.86", per: "891.55", hin: "891.43", urd: "891.439",
+    ben: "891.44", san: "891.2", yid: "839.1", swe: "839.7", dan: "839.81", nor: "839.82", ice: "839.6",
+    dut: "839.31", heb: "892.4", ara: "892.7", tur: "894.35", chi: "895.1", jpn: "895.6", kor: "895.7",
+  };
+  const LIT_FORM = [
+    [/epic/i, "epic"], [/poetry|poems|verse/i, "1"], [/drama|plays|tragedy|comedies/i, "2"],
+    [/fiction|novel|short stories|stories|fantasy/i, "3"], [/essays/i, "4"], [/speeches|orations/i, "5"],
+    [/letters|correspondence/i, "6"], [/humor|wit|satire/i, "7"], [/literature|prose|writings/i, "0"],
+  ];
+  function litNumber(base, form) {
+    // Greek & Latin put epic poetry with fiction (883, 873); elsewhere it's poetry.
+    if (form === "epic") form = base === "87" || base === "88" ? "3" : "1";
+    if (form === "0") return base.length === 2 ? base + "0" : base;
+    if (base.length === 2) return base + form;
+    return base.includes(".") ? base + form : base + "." + form;
+  }
+  function formOf(text) {
+    for (const [re, f] of LIT_FORM) if (re.test(text)) return f;
+    return null;
+  }
+  // "Russian fiction", "English poetry", "Epic poetry, Greek", "Fiction -- Russian"
+  function literatureFromSubjects(subjects) {
+    const votes = {};
+    for (const raw of subjects) {
+      if (typeof raw !== "string") continue;
+      const s = raw.replace(/\s+--\s+/g, ", ").trim();
+      let lang = null,
+        form = null;
+      let m = s.match(/^([A-Za-z ]+?)\s+(epic poetry|poetry|drama|fiction|literature|essays|letters|short stories|wit and humor|prose literature)\b/i);
+      if (m) {
+        lang = m[1];
+        form = m[2];
+      } else if ((m = s.match(/^(epic poetry|poetry|drama|fiction|literature|essays|short stories)\s*,\s*([A-Za-z ]+)/i))) {
+        form = m[1];
+        lang = m[2];
+      }
+      if (!lang) continue;
+      const hit = LIT_LANG.find(([re]) => re.test(lang.trim()));
+      if (!hit) continue;
+      const n = litNumber(hit[1], formOf(form) || "0");
+      votes[n] = (votes[n] || 0) + (n.length > 3 || !n.endsWith("0") ? 2 : 1); // favor form-specific numbers
+    }
+    const best = Object.keys(votes).sort((a, b) => votes[b] - votes[a] || b.length - a.length)[0];
+    return best || null;
+  }
+
+  // Subject / category keywords -> Dewey number. Ordered specific to broad.
+  const KEYWORD_DDC = [
+    [/\bbible\b|scripture|gospels?\b/i, "220"], [/buddh|\bzen\b/i, "294.3"], [/hindu|vedanta|upanishad|bhagavad/i, "294.5"],
+    [/\bislam|muslim|qur.?an|koran|sufi/i, "297"], [/juda|jewish|torah|talmud/i, "296"], [/christian|church|jesus|catholic|protestant/i, "230"],
+    [/mytholog/i, "201.3"], [/religio|theolog|spiritual/i, "200"],
+    [/stoic/i, "188"], [/existential/i, "142.78"], [/phenomenolog/i, "142.7"], [/ethic|moral philosophy/i, "170"],
+    [/\blogic\b/i, "160"], [/metaphysic|ontolog/i, "110"], [/epistemolog/i, "121"],
+    [/self-help|self help|personal development|success|happiness|mindfulness/i, "158.1"],
+    [/psycholog|neuroscience|cognitive/i, "150"], [/ancient philosoph|greek philosoph/i, "180"], [/philosoph/i, "100"],
+    [/marxis|communis|socialis|anarchis/i, "335"], [/investing|investment|stock/i, "332.6"], [/econom|capitalism|finance|money|wealth/i, "330"],
+    [/international relations|geopolit|foreign relations|diplomacy/i, "327"], [/civil rights|human rights/i, "323"],
+    [/politic|government|democracy|nationalism|imperialism|colonialism/i, "320"], [/\blaw\b|legal|jurisprudence/i, "340"],
+    [/military|warfare|\bwar\b|strategy/i, "355"], [/education|pedagog|teaching/i, "370"], [/crime|criminal/i, "364"],
+    [/femini|gender|women/i, "305.4"], [/\brace\b|racism|ethnic/i, "305.8"], [/folklore|fairy tales|legends/i, "398.2"],
+    [/anthropolog|ethnograph|culture/i, "306"], [/sociolog|society|social/i, "301"],
+    [/marketing|advertising/i, "658.8"], [/business|management|leadership|entrepreneur/i, "658"],
+    [/linguist|language|grammar/i, "410"],
+    [/mathemat|statistics/i, "510"], [/astronom|cosmolog|universe|astrophysic/i, "520"], [/quantum|relativity|physics/i, "530"],
+    [/chemistr/i, "540"], [/geolog|earth science/i, "550"], [/evolution|darwin|natural selection/i, "576.8"], [/genetic|\bdna\b|genome/i, "576.5"],
+    [/ecology|environment|climate/i, "577"], [/paleontolog|dinosaur|fossil/i, "560"], [/botany|plants/i, "580"],
+    [/zoolog|animals|birds|mammals/i, "590"], [/biolog|life science/i, "570"], [/science/i, "500"],
+    [/programming|software|algorithm/i, "005"], [/artificial intelligence|machine learning/i, "006.3"], [/computer|internet|digital|information technology/i, "004"],
+    [/nutrition|diet/i, "613.2"], [/medicine|medical|health|disease/i, "610"], [/cooking|cookbook|recipes|cookery/i, "641.5"],
+    [/engineering/i, "620"], [/agricultur|farming|gardening/i, "630"], [/parenting|child rearing/i, "649"], [/technolog/i, "600"],
+    [/architect/i, "720"], [/painting|painters/i, "750"], [/photograph/i, "770"], [/\bfilm|cinema|motion picture/i, "791.43"],
+    [/music|jazz|opera/i, "780"], [/theater|theatre/i, "792"], [/chess/i, "794.1"], [/sports?\b|football|baseball|basketball|soccer|running/i, "796"],
+    [/\bart\b|\barts\b|design|sculpture|aesthetic/i, "700"],
+    [/literary criticism|history and criticism/i, "809"], [/writing|rhetoric|authorship/i, "808"],
+    [/autobiograph|memoir|biograph/i, "920"], [/travel/i, "910"],
+    [/world war,? 1939|world war ii|second world war/i, "940.53"], [/world war,? 1914|world war i\b|first world war/i, "940.3"],
+    [/ancient (greece|greek)/i, "938"], [/ancient rome|roman empire|\brome\b/i, "937"], [/ancient egypt/i, "932"],
+    [/ancient|antiquity|classical/i, "930"], [/medieval|middle ages/i, "940.1"], [/europe/i, "940"], [/china|chinese/i, "951"],
+    [/japan/i, "952"], [/india\b|indian subcontinent/i, "954"], [/middle east|arab/i, "956"], [/africa/i, "960"],
+    [/united states|american history/i, "973"], [/latin america|south america/i, "980"], [/histor/i, "900"], [/geograph/i, "910"],
+  ];
+  function keywordDdc(text) {
+    for (const [re, n] of KEYWORD_DDC) if (re.test(text)) return n;
+    return null;
+  }
+  const LIT_GENRES = { Fiction: "3", "Science Fiction": "3", Fantasy: "3", Poetry: "1", Drama: "2" };
+
+  function estimateDdc(b, subjects, genres, langs) {
+    const leads = subjects
+      .filter((s) => typeof s === "string" && !JUNK.test(s))
+      .map((s) => s.split(/\s+--\s+|[,(]/)[0].trim());
+    // 1) your own category / shelves on the reading list (explicit intent)
+    const own = [b.subsubcategory, b.subcategory, b.category].filter((c) => c && !/^(uncategorized|read|to read|currently reading)$/i.test(c));
+    for (const c of own) {
+      const lit = literatureFromSubjects([c]);
+      if (lit) return lit;
+      const n = keywordDdc(c);
+      if (n) return n;
+    }
+    // 2) literature by language + form, from catalog subjects
+    const lit = literatureFromSubjects(subjects);
+    if (lit) return lit;
+    // 3) creative writing without a stated nationality: form from genres, language from the edition
+    const litGenre = genres.find((g) => LIT_GENRES[g]);
+    if (litGenre) {
+      const code = langs.length === 1 ? langs[0] : langs.includes("eng") ? "eng" : null;
+      const base = code && LANG_CODE[code] ? LANG_CODE[code] : "82";
+      const us = leads.some((s) => /united states|america/i.test(s));
+      return litNumber(base === "82" && us ? "81" : base, LIT_GENRES[litGenre]);
+    }
+    // 4) subject keywords: majority vote across the catalog subjects
+    const votes = {};
+    leads.forEach((s, i) => {
+      const n = keywordDdc(s);
+      if (n) votes[n] = (votes[n] || 0) + 1 + 1 / (i + 2); // earlier subjects break ties
+    });
+    const top = Object.keys(votes).sort((a, b) => votes[b] - votes[a])[0];
+    if (top) return top;
+    // 5) canonical genres, then the title itself
+    for (const g of genres) {
+      const n = keywordDdc(g);
+      if (n) return n;
+    }
+    return keywordDdc(b.title);
+  }
+
+  async function resolveMeta(b) {
     const isbn = (b.isbn || "").replace(/[^0-9Xx]/g, "");
+    const cands = [];
+    let subjects = [];
+    let langs = [];
+    let genres = [];
+    let reached = false; // did any lookup reach Open Library?
+    const addDdc = (list, w) =>
+      (Array.isArray(list) ? list : [list]).forEach((raw) => {
+        const n = cleanDdc(raw);
+        if (n) cands.push({ n, w });
+      });
+
     if (isbn) {
       try {
         const e = await fetch(`https://openlibrary.org/isbn/${isbn}.json`);
+        reached = reached || e.ok || e.status === 404;
         if (e.ok) {
           const ed = await e.json();
+          addDdc(ed.dewey_decimal_class || [], 6); // this exact edition's catalog record
+          langs = (ed.languages || []).map((l) => String(l.key || "").split("/").pop()).filter(Boolean);
           const wk = ed.works && ed.works[0] && ed.works[0].key;
           if (wk) {
             const w = await fetch(`https://openlibrary.org${wk}.json`);
             if (w.ok) {
               const wj = await w.json();
-              const g = canonGenres(wj.subjects);
-              if (g.length) return g;
+              subjects = wj.subjects || [];
+              genres = canonGenres(subjects);
             }
           }
         }
       } catch (e) {}
     }
-    try {
-      const p = new URLSearchParams({ title: b.title, limit: "5", fields: "subject" });
-      if (b.author) p.set("author", b.author);
-      const r = await fetch(`https://openlibrary.org/search.json?${p}`);
-      if (r.ok) {
-        const j = await r.json();
-        for (const d of j.docs || []) {
-          if (d.subject && d.subject.length) {
-            const g = canonGenres(d.subject);
-            if (g.length) return g;
-          }
+    if (!cands.length || !genres.length) {
+      try {
+        const p = new URLSearchParams({ title: b.title, limit: "5", fields: "ddc,subject,language" });
+        if (b.author) p.set("author", b.author);
+        const r = await fetch(`https://openlibrary.org/search.json?${p}`);
+        reached = reached || r.ok;
+        if (r.ok) {
+          const j = await r.json();
+          (j.docs || []).forEach((d, i) => {
+            addDdc(d.ddc || [], 5 - i); // better-ranked matches count more
+            if (!genres.length && d.subject && d.subject.length) {
+              const g = canonGenres(d.subject);
+              if (g.length) {
+                genres = g;
+                if (!subjects.length) subjects = d.subject;
+              }
+            }
+            if (!langs.length && d.language) langs = d.language;
+          });
         }
-      }
-    } catch (e) {}
-    return [];
-  }
-
-  let genreJobs = 0;
-  function ensureGenres() {
-    let assigned = false;
-    for (const b of GOODREADS) {
-      if (b._g) continue;
-      const k = genreKey(b);
-      if (genreCache[k] !== undefined) {
-        b.genres = genreCache[k];
-        b._g = true;
-        assigned = true;
-      }
+      } catch (e) {}
     }
-    if (assigned) scheduleGenreRefresh();
-    const need = GOODREADS.filter((b) => !b._g);
-    need.forEach((b) => {
-      genreJobs++;
-      genreQ.add(() => loadGenre(b));
-    });
+    let ddc = pickDdc(cands);
+    let est = false;
+    if (!ddc) {
+      ddc = estimateDdc(b, subjects, genres, langs);
+      est = !!ddc;
+    }
+    return { g: genres, d: ddc || null, e: est, ok: reached };
   }
 
-  async function loadGenre(b) {
+  function applyMeta(b, m) {
+    b.genres = m.g || [];
+    if (b.ddcSrc !== "manual") {
+      b.ddc = m.d || "";
+      b.ddcSrc = m.d ? (m.e ? "est" : "ol") : "";
+    }
+    b._c = true;
+  }
+
+  async function getMeta(b) {
     const k = genreKey(b);
-    let g = genreCache[k];
-    if (g === undefined) {
-      g = await resolveGenres(b);
-      genreCache[k] = g;
-      genreDirty = true;
+    let m = classCache[k];
+    if (m === undefined) {
+      m = await resolveMeta(b);
+      // offline: keep the estimate for this session but try the catalog again next time
+      if (m.ok) {
+        classCache[k] = { g: m.g, d: m.d, e: m.e };
+        classDirty = true;
+      }
     }
-    b.genres = g || [];
-    b._g = true;
+    return m;
+  }
+
+  let classJobs = 0;
+  function ensureClassified() {
+    const data = currentData();
+    if (!data.length) return;
+    let assigned = false;
+    for (const b of data) {
+      if (b._c || b._q) continue;
+      const m = classCache[genreKey(b)];
+      if (m !== undefined) {
+        applyMeta(b, m);
+        assigned = true;
+      } else {
+        b._q = true;
+        classJobs++;
+        classQ.add(() => loadClass(b));
+      }
+    }
+    if (assigned) {
+      scheduleChipRefresh();
+      schedulePersist();
+    }
+  }
+
+  async function loadClass(b) {
+    const m = await getMeta(b);
+    applyMeta(b, m);
+    b._q = false;
     updateCardTag(b);
-    scheduleGenreRefresh();
-    genreJobs--;
-    if (genreJobs === 0 && state.tab === "goodreads" && state.genre) render();
+    scheduleChipRefresh();
+    schedulePersist();
+    classJobs--;
+    // re-shelve once the queue drains (order/filters depend on the numbers)
+    if (classJobs === 0 && (state.sort === "ddc" || state.ddc || looksLikeDdc(state.q))) render();
   }
 
   function updateCardTag(b) {
-    if (state.tab !== "goodreads") return;
+    if (!currentData().includes(b)) return;
     const c = els.results.querySelector(`.card[data-id="${b.id}"] .c`);
     if (c) c.textContent = cardTag(b);
   }
 
   let refreshT;
-  function scheduleGenreRefresh() {
+  function scheduleChipRefresh() {
     clearTimeout(refreshT);
     refreshT = setTimeout(() => {
-      if (state.tab === "goodreads" && GOODREADS.length) buildGenreChips(GOODREADS);
+      if (currentData().length) buildDdcChips(currentData());
     }, 400);
   }
 
-  function buildGenreChips(data) {
-    const counts = {};
-    data.forEach((b) => (b.genres || []).forEach((g) => (counts[g] = (counts[g] || 0) + 1)));
-    const genres = Object.keys(counts).sort((a, b) => counts[b] - counts[a] || a.localeCompare(b));
-    const resolved = data.filter((b) => b._g).length;
-    const pending = data.length - resolved;
-    let html =
-      `<button class="chip ${state.genre === "" ? "is-active" : ""}" data-genre="">All<span class="n">${data.length}</span></button>` +
-      genres
-        .map(
-          (g) =>
-            `<button class="chip ${state.genre === g ? "is-active" : ""}" data-genre="${attr(g)}">${escapeHtml(
-              g
-            )}<span class="n">${counts[g]}</span></button>`
-        )
-        .join("");
-    if (pending > 0) html += `<span class="chip-loading">finding genres… ${resolved}/${data.length}</span>`;
+  let persistT;
+  function schedulePersist() {
+    clearTimeout(persistT);
+    persistT = setTimeout(() => {
+      if (READING.length) persistReading();
+      if (GOODREADS.length) persistGoodreads();
+    }, 1200);
+  }
+
+  /* ---------------- Dewey chips: class › division › section drill-down ---------------- */
+  function ddcCounts(data) {
+    const c = { none: 0 };
+    for (const b of data) {
+      if (!b.ddc) {
+        if (b._c) c.none++;
+        continue;
+      }
+      const d = b.ddc.replace(".", "");
+      for (let i = 1; i <= 3; i++) c[d.slice(0, i)] = (c[d.slice(0, i)] || 0) + 1;
+    }
+    return c;
+  }
+
+  function buildDdcChips(data) {
+    const counts = ddcCounts(data);
+    const f = parseDdcQuery(state.ddc);
+    const p = f && f.type === "prefix" ? f.p : "";
+    const chip = (code, label, n, active, title) =>
+      `<button class="chip ${active ? "is-active" : ""}" data-ddc="${attr(code)}" title="${attr(title || label)}">${escapeHtml(
+        label
+      )}<span class="n">${n}</span></button>`;
+
+    let html = `<div class="chip-row">` + chip("", "All", data.length, !state.ddc);
+    for (let d = 0; d <= 9; d++) {
+      const k = String(d);
+      if (!counts[k] && p[0] !== k) continue;
+      html += chip(k, `${k}00 ${shortMain(k)}`, counts[k] || 0, p[0] === k, DEWEY.MAIN[k]);
+    }
+    if (counts.none) html += chip("none", "Unclassified", counts.none, state.ddc === "none");
+    const pending = data.filter((b) => !b._c).length;
+    if (pending > 0) html += `<span class="chip-loading">classifying… ${data.length - pending}/${data.length}</span>`;
+    html += `</div>`;
+
+    // second / third rows: divisions of the chosen class, sections of the chosen division
+    for (let lvl = 1; lvl <= 2 && p.length >= lvl; lvl++) {
+      const parent = p.slice(0, lvl);
+      let row = "";
+      for (let d = 0; d <= 9; d++) {
+        const k = parent + d;
+        if (!counts[k]) continue;
+        const label = lvl === 1 ? divisionLabel(k) : sectionLabel(k);
+        row += chip(k, `${prefixDisplay(k)} ${label}`, counts[k], p.startsWith(k), label);
+      }
+      if (row) html += `<div class="chip-row sub">${row}</div>`;
+    }
     els.tagbar.innerHTML = html;
+  }
+
+  function shortMain(k) {
+    return {
+      0: "General works", 1: "Philosophy", 2: "Religion", 3: "Social sciences", 4: "Language",
+      5: "Science", 6: "Technology", 7: "Arts", 8: "Literature", 9: "History",
+    }[k];
   }
 
   /* ---------------- filter chrome ---------------- */
@@ -486,26 +867,17 @@
       '<option value="">All</option>' +
       authors.map((a) => `<option value="${attr(a)}">${escapeHtml(a)}</option>`).join("");
     els.authorFilter.value = state.author;
+    els.ddcInput.value = state.ddc === "none" ? "" : state.ddc;
 
-    if (state.tab === "goodreads") {
-      buildGenreChips(data);
-      return;
-    }
+    buildDdcChips(data);
+  }
 
-    // category chips (reading list)
-    const counts = {};
-    data.forEach((b) => (counts[b.category] = (counts[b.category] || 0) + 1));
-    const cats = Object.keys(counts).sort((a, b) => counts[b] - counts[a]);
-    els.tagbar.innerHTML =
-      `<button class="chip ${state.category === "" ? "is-active" : ""}" data-cat="">All<span class="n">${data.length}</span></button>` +
-      cats
-        .map(
-          (c) =>
-            `<button class="chip ${state.category === c ? "is-active" : ""}" data-cat="${attr(c)}">${escapeHtml(
-              c
-            )}<span class="n">${counts[c]}</span></button>`
-        )
-        .join("");
+  // code: prefix digits ("8", "82", "8238"), "none" for unclassified, or "" for all
+  function setDdcFilter(code) {
+    state.ddc = !code ? "" : code === "none" ? "none" : prefixQuery(code);
+    els.ddcInput.value = state.ddc === "none" ? "" : state.ddc;
+    buildDdcChips(currentData());
+    render();
   }
 
   /* ---------------- goodreads import ---------------- */
@@ -571,29 +943,115 @@
     reader.readAsText(file);
   }
 
-  // Merge new books in, skipping any already present (by ISBN, else author+title).
-  function dedupeKey(b) {
-    const isbn = (b.isbn || "").replace(/[^0-9Xx]/g, "");
-    return isbn ? "i:" + isbn : "t:" + (b.author + "|" + b.title).toLowerCase().trim();
+  /* ---------------- duplicate detection ----------------
+   * Two entries are the same book when they share an ISBN (ISBN-10 and -13 are
+   * unified) OR the same author surname + normalized title. Title normalization
+   * drops accents, punctuation, leading articles, subtitles and Goodreads series
+   * tags, so "The Republic" / "Republic (Penguin Classics)" / "Republic: A New
+   * Translation" all match, and so do different editions of one book.
+   */
+  function fold(s) {
+    return String(s || "")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toLowerCase()
+      .replace(/&/g, " and ");
   }
-  function importGoodreadsBooks(books) {
-    const seen = new Set(GOODREADS.map(dedupeKey));
-    let id = nextId(GOODREADS);
-    let added = 0;
-    for (const nb of books) {
-      const k = dedupeKey(nb);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      const n = normalize(nb, id);
-      id++;
-      GOODREADS.push(n);
+  function normTitle(t) {
+    let s = fold(t)
+      .replace(/\s*[([][^)\]]*[)\]]\s*/g, " ") // "(The Expanse, #1)", "[Illustrated]"
+      .split(/\s*[:;]\s+|\s+[-—–]\s+/)[0] // subtitle
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+    s = s.replace(/^(the|a|an|le|la|les|el|los|las|il|der|die|das) /, "");
+    return s;
+  }
+  function surname(a) {
+    let s = fold(a).trim();
+    if (!s) return "";
+    if (s.includes(",")) return s.split(",")[0].replace(/[^a-z0-9]+/g, "");
+    const parts = s.replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter((w) => !/^(jr|sr|ii|iii|iv|phd|md)$/.test(w));
+    return parts[parts.length - 1] || "";
+  }
+  function isbnKey(raw) {
+    let d = String(raw || "").replace(/[^0-9Xx]/g, "").toUpperCase();
+    if (d.length === 10) {
+      // ISBN-10 -> ISBN-13 so both forms of one edition match
+      const core = "978" + d.slice(0, 9);
+      let sum = 0;
+      for (let i = 0; i < 12; i++) sum += +core[i] * (i % 2 ? 3 : 1);
+      d = core + ((10 - (sum % 10)) % 10);
+    }
+    return d.length === 13 ? "i:" + d : "";
+  }
+  function bookKeys(b) {
+    const keys = [];
+    const ik = isbnKey(b.isbn);
+    if (ik) keys.push(ik);
+    const t = normTitle(b.title);
+    if (t) keys.push("t:" + surname(b.author) + "|" + t);
+    return keys;
+  }
+  // Fold what the duplicate knows into the entry we keep.
+  function mergeInto(keep, dup) {
+    keep.read = keep.read || !!dup.read;
+    keep.primary = keep.primary || !!dup.primary;
+    keep.rating = Math.max(keep.rating || 0, dup.rating || 0);
+    if (!keep.isbn && dup.isbn) keep.isbn = dup.isbn;
+    if (!keep.note && dup.note) keep.note = dup.note;
+    const dd = cleanDdc(dup.ddc);
+    if (dd && (!keep.ddc || (dup.ddcSrc === "manual" && keep.ddcSrc !== "manual"))) {
+      keep.ddc = dd;
+      keep.ddcSrc = dup.ddcSrc || "manual";
+    }
+  }
+  function makeIndex(list) {
+    const idx = new Map();
+    for (const b of list) for (const k of bookKeys(b)) if (!idx.has(k)) idx.set(k, b);
+    return idx;
+  }
+  function findIn(idx, b) {
+    for (const k of bookKeys(b)) if (idx.has(k)) return idx.get(k);
+    return null;
+  }
+  // Append `incoming` to `target` (in place), skipping duplicates of existing
+  // entries and of each other. Returns counts for the toast.
+  function mergeBooks(target, incoming, fresh = true) {
+    const idx = makeIndex(target);
+    let id = nextId(target);
+    let added = 0,
+      dup = 0;
+    for (const nb of incoming) {
+      const hit = findIn(idx, nb);
+      if (hit) {
+        mergeInto(hit, nb);
+        dup++;
+        continue;
+      }
+      const n = fresh ? normalize(nb, id++) : nb;
+      target.push(n);
+      for (const k of bookKeys(n)) if (!idx.has(k)) idx.set(k, n);
       added++;
     }
+    return { added, dup };
+  }
+  // Remove duplicates already inside a list (e.g. saved before this check existed).
+  function dedupeList(list) {
+    const out = [];
+    const r = mergeBooks(out, list, false);
+    return { list: out, removed: r.dup };
+  }
+  function importToast(r) {
+    const skipped = r.dup ? ` · ${r.dup} duplicate${r.dup === 1 ? "" : "s"} skipped` : "";
+    toast(r.added ? `Added ${r.added} new${skipped}` : `Nothing new${skipped}`);
+  }
+
+  function importGoodreadsBooks(books) {
+    const r = mergeBooks(GOODREADS, books);
     persistGoodreads();
     buildFilters();
     render();
-    const dup = books.length - added;
-    toast(added ? `Added ${added} new · ${dup} already in your library` : `Nothing new · ${dup} already in your library`);
+    importToast(r);
   }
 
   function loadStoredGoodreads() {
@@ -707,12 +1165,12 @@
       alert("No books found. Use lines like:  - Author — _Title_  under a ## Category heading.");
       return;
     }
-    READING = books.map(normalize);
-    try {
-      localStorage.setItem("readinglist.v1", JSON.stringify(READING));
-    } catch (e) {}
+    const r = mergeBooks(READING, books);
+    persistReading();
+    closeModal();
     buildFilters();
     render();
+    importToast(r);
   }
 
   function loadStoredReading() {
@@ -740,7 +1198,6 @@
       sub = "",
       subsub = "";
     const books = [];
-    const seen = new Set();
     for (const raw of String(text).split(/\r?\n/)) {
       const line = raw.replace(/\s+$/, "");
       if (line.startsWith("#### ")) {
@@ -768,7 +1225,8 @@
       if (!item) continue;
       const read = item.includes("✅") || /\[x\]/i.test(item);
       const primary = /!primary/i.test(item);
-      item = item.replace(/✅/g, "").replace(/!primary/gi, "").replace(/^\[[ xX]\]\s*/, "").trim();
+      const dm = item.match(/\{\s*(\d{3}(?:\.\d+)?)\s*\}/); // optional Dewey number: {823.8}
+      item = item.replace(/✅/g, "").replace(/!primary/gi, "").replace(/\{[^}]*\}/g, "").replace(/^\[[ xX]\]\s*/, "").trim();
       let author = "";
       let parsed;
       const split = item.match(/^(.*?)\s[—–-]\s(.*)$/); // "Author — Title" (em/en/hyphen)
@@ -779,9 +1237,6 @@
         parsed = cleanReadingTitle(item);
       }
       if (!parsed.title) continue;
-      const key = (author + "|" + parsed.title).toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
       books.push({
         title: parsed.title,
         author,
@@ -790,6 +1245,7 @@
         subsubcategory: subsub,
         read,
         primary,
+        ddc: dm ? dm[1] : "",
         note: parsed.note,
         id: books.length,
       });
@@ -882,8 +1338,7 @@
   /* ---------------- events ---------------- */
   function resetFiltersForTab() {
     state.author = "";
-    state.category = "";
-    state.genre = "";
+    state.ddc = "";
     state.status = "";
     els.statusFilter.value = "";
     els.search.value = state.q; // keep search across tabs
@@ -928,11 +1383,28 @@
   els.tagbar.addEventListener("click", (e) => {
     const chip = e.target.closest(".chip");
     if (!chip) return;
-    if (state.tab === "goodreads") state.genre = chip.dataset.genre;
-    else state.category = chip.dataset.cat;
-    document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("is-active", c === chip));
-    render();
+    // clicking the active chip steps back up one level
+    const code = chip.dataset.ddc;
+    setDdcFilter(chip.classList.contains("is-active") && code && code !== "none" ? code.slice(0, -1) : code);
   });
+
+  let ddcT;
+  els.ddcInput.addEventListener("input", () => {
+    clearTimeout(ddcT);
+    ddcT = setTimeout(() => {
+      const v = els.ddcInput.value.trim();
+      if (v && !parseDdcQuery(v)) {
+        els.ddcInput.classList.add("bad");
+        return;
+      }
+      els.ddcInput.classList.remove("bad");
+      state.ddc = v;
+      buildDdcChips(currentData());
+      render();
+    }, 200);
+  });
+  document.getElementById("ddcBrowse").addEventListener("click", () => openDdcPicker({ mode: "search" }));
+  document.getElementById("ddcGuide").addEventListener("click", openDdcGuide);
 
   /* ---------------- helpers ---------------- */
   function escapeHtml(s) {
@@ -944,11 +1416,12 @@
 
   /* ---------------- data mutations (add / delete) ---------------- */
   function persist() {
-    if (state.tab === "reading") {
-      try { localStorage.setItem("readinglist.v1", JSON.stringify(READING)); } catch (e) {}
-    } else {
-      persistGoodreads();
-    }
+    if (state.tab === "reading") persistReading();
+    else persistGoodreads();
+  }
+  // Transient fields (_c, _q, genres) are dropped: normalize() whitelists on load.
+  function persistReading() {
+    try { localStorage.setItem("readinglist.v1", JSON.stringify(READING)); } catch (e) {}
   }
   function persistGoodreads() {
     try { localStorage.setItem("goodreads.v1", JSON.stringify(GOODREADS)); } catch (e) {}
@@ -971,6 +1444,15 @@
   }
   function addBookToCurrent(data) {
     const arr = currentData();
+    const existing = findIn(makeIndex(arr), data);
+    if (existing) {
+      mergeInto(existing, data);
+      persist();
+      toast(`“${existing.title}” is already in your library`);
+      render();
+      openDetail(existing.id);
+      return;
+    }
     const b = normalize(data, nextId(arr));
     arr.unshift(b);
     persist();
@@ -1075,10 +1557,10 @@
     document.removeEventListener("keydown", escClose);
   }
   function escClose(e) { if (e.key === "Escape") closeModal(); }
-  function openModal(inner) {
+  function openModal(inner, cls = "") {
     const host = document.getElementById("modalHost");
     host.innerHTML =
-      `<div class="overlay" id="overlay"><div class="modal" role="dialog" aria-modal="true">` +
+      `<div class="overlay" id="overlay"><div class="modal ${cls}" role="dialog" aria-modal="true">` +
       `<button class="modal-close" aria-label="Close">×</button>${inner}</div></div>`;
     const overlay = host.querySelector(".overlay");
     overlay.addEventListener("click", (e) => { if (e.target === overlay) closeModal(); });
@@ -1086,11 +1568,16 @@
     document.addEventListener("keydown", escClose);
   }
 
+  function detailTags(b) {
+    const base = state.tab === "reading" ? [b.category, b.subcategory].filter((c) => c && c !== "Uncategorized") : [];
+    return [...new Set([...base, ...(b.genres || [])])];
+  }
+
   function openDetail(id) {
     const b = bookById(id);
     if (!b) return;
     modalBookId = b.id;
-    const tags = b.genres && b.genres.length ? b.genres : [b.category, b.subcategory].filter(Boolean);
+    const tags = detailTags(b);
     const meta = [b.read ? "✓ Read" : "Unread"];
     if (b.primary) meta.push("Primary source");
     if (b.rating) meta.push("★ " + b.rating + "/5");
@@ -1103,12 +1590,81 @@
           <div class="d-tags" id="dTags">${tags.map((t) => `<span class="d-tag">${escapeHtml(t)}</span>`).join("")}</div>
           <div class="d-meta">${meta.map((m) => `<span>${escapeHtml(m)}</span>`).join("")}</div>
         </div>
+        <div class="d-ddc" id="dDdc"></div>
         <div class="d-summary muted" id="dSummary">Loading summary…</div>
         <div class="d-actions"><button class="btn-danger" id="dDelete">Delete book</button></div>
       </div>`);
+    renderDetailDdc(b);
     setDetailCover(document.getElementById("dCover"), b);
     document.getElementById("dDelete").addEventListener("click", () => { closeModal(); deleteBook(id); });
     loadDetailExtras(b);
+  }
+
+  const DDC_SRC = {
+    ol: "From library catalog records (Open Library)",
+    est: "Estimated from subjects & genres — no catalog record found. Check it or set your own.",
+    manual: "Set by you",
+  };
+  function renderDetailDdc(b) {
+    const el = document.getElementById("dDdc");
+    if (!el) return;
+    const path = ddcPath(b.ddc);
+    const head = b.ddc
+      ? `<div class="ddc-num">${escapeHtml(b.ddc)}${b.ddcSrc === "est" ? '<span class="ddc-est">est.</span>' : ""}</div>
+         <div class="ddc-path">${path
+           .map((n) => `<button type="button" class="crumb" data-p="${n.p}" title="Show every book in ${n.code}"><b>${n.code}</b> ${escapeHtml(n.label)}</button>`)
+           .join('<span class="sep">›</span>')}${
+           b.ddc.length > 3 ? `<span class="sep">›</span><button type="button" class="crumb" data-p="${b.ddc.replace(".", "")}"><b>${escapeHtml(b.ddc)}</b></button>` : ""
+         }</div>
+         <div class="ddc-src">${escapeHtml(DDC_SRC[b.ddcSrc] || "")}</div>`
+      : `<div class="ddc-num muted">${b._c ? "Unclassified" : "Classifying…"}</div>
+         <div class="ddc-src">${b._c ? "No catalog number or subject match found. Assign one below." : "Looking up the catalog record…"}</div>`;
+    el.innerHTML = `
+      <div class="ddc-label">Dewey Decimal</div>
+      ${head}
+      <div class="ddc-edit">
+        <input type="text" id="dDdcIn" placeholder="${b.ddc ? "Change number, e.g. " + escapeHtml(b.ddc) : "e.g. 823.8"}" inputmode="decimal" autocomplete="off" spellcheck="false" />
+        <button type="button" class="btn-ghost sm" id="dDdcSave">Save</button>
+        <button type="button" class="btn-ghost sm" id="dDdcPick">Pick by category…</button>
+        ${b.ddcSrc === "manual" ? '<button type="button" class="btn-ghost sm" id="dDdcReset" title="Use the catalog / estimated number again">Reset</button>' : ""}
+      </div>`;
+    el.querySelectorAll(".crumb").forEach((c) =>
+      c.addEventListener("click", () => { closeModal(); setDdcFilter(c.dataset.p); })
+    );
+    const inp = document.getElementById("dDdcIn");
+    const save = () => {
+      const n = cleanDdc(inp.value);
+      if (!n) { inp.classList.add("bad"); inp.focus(); return; }
+      setBookDdc(b, n);
+    };
+    document.getElementById("dDdcSave").addEventListener("click", save);
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    document.getElementById("dDdcPick").addEventListener("click", () =>
+      openDdcPicker({ mode: "assign", start: b.ddc, book: b })
+    );
+    const reset = document.getElementById("dDdcReset");
+    if (reset)
+      reset.addEventListener("click", async () => {
+        b.ddcSrc = "";
+        b.ddc = "";
+        b._c = false;
+        renderDetailDdc(b);
+        applyMeta(b, await getMeta(b));
+        persist();
+        render();
+        if (modalBookId === b.id) renderDetailDdc(b);
+      });
+  }
+
+  function setBookDdc(b, n) {
+    b.ddc = n;
+    b.ddcSrc = "manual";
+    b._c = true;
+    persist();
+    buildDdcChips(currentData());
+    render();
+    toast(`Filed “${b.title}” under ${n}`);
+    openDetail(b.id);
   }
 
   async function setDetailCover(cov, b) {
@@ -1129,18 +1685,19 @@
   }
 
   async function loadDetailExtras(b) {
-    const needGenres = !(b.genres && b.genres.length);
-    const [desc, genres] = await Promise.all([
-      getDescription(b),
-      needGenres ? resolveGenres(b) : Promise.resolve(b.genres || []),
-    ]);
+    const needMeta = !b._c;
+    const [desc, m] = await Promise.all([getDescription(b), needMeta ? getMeta(b) : Promise.resolve(null)]);
+    if (m && !b._c) {
+      applyMeta(b, m);
+      updateCardTag(b);
+      scheduleChipRefresh();
+      schedulePersist();
+    }
     if (modalBookId !== b.id) return; // modal closed or switched
-    if (needGenres && genres.length) {
-      b.genres = genres;
-      const base = state.tab === "reading" ? [b.category, b.subcategory].filter(Boolean) : [];
-      const all = [...new Set([...base, ...genres])];
+    if (m) {
       const tagsEl = document.getElementById("dTags");
-      if (tagsEl) tagsEl.innerHTML = all.map((t) => `<span class="d-tag">${escapeHtml(t)}</span>`).join("");
+      if (tagsEl) tagsEl.innerHTML = detailTags(b).map((t) => `<span class="d-tag">${escapeHtml(t)}</span>`).join("");
+      renderDetailDdc(b);
     }
     const sEl = document.getElementById("dSummary");
     if (sEl) {
@@ -1161,6 +1718,7 @@
           ? `<label>Shelf<select id="fShelf"><option value="read">Read</option><option value="to-read">To Read</option><option value="currently-reading">Currently Reading</option></select></label>`
           : `<label>Category<input type="text" id="fCat" placeholder="e.g. Philosophy" autocomplete="off" spellcheck="false" /></label>
              <label class="row-check"><input type="checkbox" id="fRead" /> I've read this</label>`}
+        <label>Dewey number <span style="text-transform:none;letter-spacing:normal;color:var(--faint)">— optional, looked up automatically if blank</span><input type="text" id="fDdc" placeholder="e.g. 823.8" inputmode="decimal" autocomplete="off" spellcheck="false" /></label>
         <div class="mform-actions">
           <button type="button" class="btn-ghost" id="fCancel">Cancel</button>
           <button type="submit" class="btn-primary">Add book</button>
@@ -1173,6 +1731,12 @@
       if (!title) return;
       const author = document.getElementById("fAuthor").value.trim();
       const isbn = document.getElementById("fIsbn").value.replace(/[^0-9Xx]/g, "");
+      const ddcRaw = document.getElementById("fDdc").value.trim();
+      const ddc = cleanDdc(ddcRaw);
+      if (ddcRaw && !ddc) {
+        document.getElementById("fDdc").classList.add("bad");
+        return;
+      }
       let data;
       if (gr) {
         const shelf = document.getElementById("fShelf").value;
@@ -1181,6 +1745,7 @@
         const category = document.getElementById("fCat").value.trim() || "Uncategorized";
         data = { title, author, isbn, category, read: document.getElementById("fRead").checked, primary: false };
       }
+      if (ddc) Object.assign(data, { ddc, ddcSrc: "manual" });
       closeModal();
       addBookToCurrent(data);
     });
@@ -1203,13 +1768,289 @@
     }, 2600);
   }
 
+  /* ---------------- Dewey picker: assemble a number by choosing categories ----------------
+   * mode "search": filter the library at whatever level you stop (class, division,
+   * section, or deeper with decimals). mode "assign": file one book under a number.
+   */
+  function openDdcPicker({ mode, start = "", book = null }) {
+    const digits = (start || "").replace(".", "");
+    const st = { p: digits.slice(0, 3), dec: digits.slice(3) };
+    const counts = ddcCounts(currentData());
+    const assign = mode === "assign";
+
+    function assembled() {
+      const d = st.p.padEnd(3, "_");
+      return d + (st.dec ? "." + st.dec : "");
+    }
+    function query() {
+      return st.p.length === 3 ? st.p + st.dec : st.p;
+    }
+    function rows() {
+      const lvl = st.p.length;
+      if (lvl === 3) return "";
+      let out = "";
+      for (let d = 0; d <= 9; d++) {
+        const k = st.p + d;
+        const code = k.padEnd(3, "0");
+        const label = lvl === 0 ? DEWEY.MAIN[k] : lvl === 1 ? divisionLabel(k) : sectionLabel(k);
+        const blurb = lvl === 0 ? DEWEY.BLURB[k] : "";
+        const n = counts[k] || 0;
+        out += label
+          ? `<button type="button" class="pk-row" data-d="${d}"><span class="pk-code">${code}</span><span class="pk-lbl">${escapeHtml(label)}${
+              blurb ? `<small>${escapeHtml(blurb)}</small>` : ""
+            }</span><span class="pk-n">${n || ""}</span></button>`
+          : `<div class="pk-row off"><span class="pk-code">${code}</span><span class="pk-lbl">Unassigned</span><span class="pk-n"></span></div>`;
+      }
+      return out;
+    }
+    function crumbs() {
+      const parts = [`<button type="button" class="crumb" data-lvl="0">All classes</button>`];
+      for (let i = 1; i <= st.p.length; i++) {
+        const k = st.p.slice(0, i);
+        const label = i === 1 ? shortMain(k) : i === 2 ? divisionLabel(k) : sectionLabel(k);
+        parts.push(`<button type="button" class="crumb" data-lvl="${i}"><b>${k.padEnd(3, "0")}</b> ${escapeHtml(label)}</button>`);
+      }
+      return parts.join('<span class="sep">›</span>');
+    }
+    function hint() {
+      const lvl = st.p.length;
+      if (lvl === 0) return "Step 1 of 3 — pick a main class (the hundreds digit).";
+      if (lvl === 1) return "Step 2 of 3 — pick a division (the tens digit).";
+      if (lvl === 2) {
+        const lit = st.p[0] === "8" && st.p[1] >= "1" && st.p[1] <= "8";
+        return "Step 3 of 3 — pick a section (the units digit)." + (lit ? " In literature the last digit is the form: 1 poetry, 2 drama, 3 fiction, 4 essays…" : "");
+      }
+      return assign
+        ? "Add decimals if you know them (e.g. .8 for Victorian-era English fiction), or file it as is."
+        : "Optionally add decimals to narrow further.";
+    }
+    function sectionBooks() {
+      if (st.p.length !== 3) return "";
+      const here = currentData()
+        .filter((b) => b.ddc && b.ddc.startsWith(st.p) && b !== book)
+        .sort(compareShelf)
+        .slice(0, 8);
+      if (!here.length) return "";
+      return `<div class="pk-near"><div class="ddc-label">Already on this shelf</div>${here
+        .map((b) => `<div><span class="pk-code">${escapeHtml(b.ddc)}</span> ${escapeHtml(b.title)}</div>`)
+        .join("")}</div>`;
+    }
+    function draw() {
+      const lvl = st.p.length;
+      const q = query();
+      const n = q ? currentData().filter((b) => ddcMatches(b.ddc, { type: "prefix", p: q })).length : 0;
+      const canGo = assign ? lvl === 3 : lvl >= 1;
+      const num = lvl === 3 ? st.p + (st.dec ? "." + st.dec : "") : prefixDisplay(st.p || "0");
+      const action = assign
+        ? `File under ${lvl === 3 ? num : "…"}`
+        : lvl ? `Show ${n} book${n === 1 ? "" : "s"} in ${num}${lvl < 3 ? "s" : ""}` : "Choose a class";
+      openModal(
+        `<div class="picker">
+          <h3>${assign ? `File “${escapeHtml(book.title)}”` : "Find books by category"}</h3>
+          <div class="pk-num" aria-label="Assembled Dewey number">${escapeHtml(assembled())}</div>
+          <div class="ddc-path pk-crumbs">${crumbs()}</div>
+          <p class="pk-hint">${hint()}</p>
+          <div class="pk-list">${rows()}</div>
+          ${lvl === 3
+            ? `<label class="pk-dec">Decimals <span class="dot">${st.p}.</span><input type="text" id="pkDec" value="${attr(st.dec)}" inputmode="numeric" placeholder="optional" autocomplete="off" /></label>`
+            : ""}
+          ${sectionBooks()}
+          <div class="mform-actions">
+            ${lvl ? '<button type="button" class="btn-ghost" id="pkBack">Back</button>' : ""}
+            <button type="button" class="btn-ghost" id="pkGuide">How DDC works</button>
+            <button type="button" class="btn-primary" id="pkGo" ${canGo ? "" : "disabled"}>${escapeHtml(action)}</button>
+          </div>
+        </div>`,
+        "wide"
+      );
+      const host = document.getElementById("modalHost");
+      host.querySelectorAll(".pk-row[data-d]").forEach((r) =>
+        r.addEventListener("click", () => {
+          st.p += r.dataset.d;
+          draw();
+        })
+      );
+      host.querySelectorAll(".crumb").forEach((c) =>
+        c.addEventListener("click", () => {
+          st.p = st.p.slice(0, +c.dataset.lvl);
+          st.dec = "";
+          draw();
+        })
+      );
+      const back = document.getElementById("pkBack");
+      if (back)
+        back.addEventListener("click", () => {
+          st.p = st.p.slice(0, -1);
+          st.dec = "";
+          draw();
+        });
+      const dec = document.getElementById("pkDec");
+      if (dec) {
+        dec.addEventListener("input", () => {
+          dec.value = dec.value.replace(/\D/g, "");
+          st.dec = dec.value;
+          host.querySelector(".pk-num").textContent = assembled();
+          const q2 = query();
+          const n2 = currentData().filter((b) => ddcMatches(b.ddc, { type: "prefix", p: q2 })).length;
+          const num2 = st.p + (st.dec ? "." + st.dec : "");
+          document.getElementById("pkGo").textContent = assign
+            ? `File under ${num2}`
+            : `Show ${n2} book${n2 === 1 ? "" : "s"} in ${num2}`;
+        });
+        dec.addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+        setTimeout(() => dec.focus(), 30);
+      }
+      document.getElementById("pkGuide").addEventListener("click", openDdcGuide);
+      document.getElementById("pkGo").addEventListener("click", go);
+    }
+    function go() {
+      if (assign) {
+        if (st.p.length !== 3) return;
+        setBookDdc(book, cleanDdc(st.p + (st.dec ? "." + st.dec : "")));
+      } else if (st.p.length) {
+        closeModal();
+        setDdcFilter(query());
+      }
+    }
+    draw();
+  }
+
+  /* ---------------- DDC guide ---------------- */
+  function openDdcGuide() {
+    const counts = ddcCounts(currentData());
+    const cnt = (k) => (counts[k] ? `<span class="g-n">${counts[k]}</span>` : "");
+    const code = (p, label) => `<button type="button" class="g-code" data-p="${p}">${prefixDisplay(p)}</button> ${escapeHtml(label)}`;
+    let outline = "";
+    for (let c = 0; c <= 9; c++) {
+      const k = String(c);
+      let divs = "";
+      for (let d = 0; d <= 9; d++) {
+        const dk = k + d;
+        let secs = "";
+        for (let x = 0; x <= 9; x++) {
+          const sk = dk + x;
+          const lbl = sectionLabel(sk);
+          if (lbl) secs += `<li>${code(sk, lbl)}${cnt(sk)}</li>`;
+        }
+        divs += `<details><summary>${code(dk, divisionLabel(dk))}${cnt(dk)}</summary><ul>${secs}</ul></details>`;
+      }
+      outline += `<details class="g-class"><summary>${code(k, DEWEY.MAIN[k])}${cnt(k)}<small>${escapeHtml(DEWEY.BLURB[k])}</small></summary>${divs}</details>`;
+    }
+    const langs = [["81", "American"], ["82", "English"], ["83", "German"], ["84", "French"], ["85", "Italian"], ["86", "Spanish"], ["87", "Latin"], ["88", "Greek"]];
+    const litGrid =
+      `<table class="g-table"><thead><tr><th></th>${DEWEY.LIT_FORMS.slice(0, 4).map(([, f]) => `<th>${f}</th>`).join("")}</tr></thead><tbody>` +
+      langs.map(([b, l]) => `<tr><th>${l}</th>${DEWEY.LIT_FORMS.slice(0, 4).map(([d]) => `<td>${b}${d}</td>`).join("")}</tr>`).join("") +
+      `</tbody></table>`;
+
+    openModal(
+      `<div class="guide">
+        <h3>A guide to the Dewey Decimal Classification</h3>
+        <p>Libraries shelve nonfiction — and, in the 800s, literature — by <strong>Dewey Decimal number</strong>.
+        Every subject gets a number, and the number reads from general to specific: each digit narrows the one before it.
+        Your library is shelved in this order, so books on the same subject sit together.</p>
+
+        <h4>Reading a number</h4>
+        <div class="g-anatomy">
+          <div><span class="g-dig">8</span><small>Class</small>Literature</div>
+          <div><span class="g-dig">2</span><small>Division</small>English literature</div>
+          <div><span class="g-dig">3</span><small>Section</small>English fiction</div>
+          <div><span class="g-dig">.8</span><small>Decimals</small>Victorian period, 1837–1899</div>
+        </div>
+        <p><strong>823.8</strong> = Literature › English › Fiction › Victorian — where you'd find <em>Great Expectations</em>.
+        There are always three digits before the point (use zeros: 500 is Science in general, 510 Mathematics).
+        Decimals only ever narrow: 823.8 sits inside 823, which sits inside 820, inside 800.
+        Shelve by comparing digit by digit, so 823.8 comes <em>before</em> 823.91.</p>
+
+        <h4>The ten main classes</h4>
+        <ul class="g-classes">${Object.keys(DEWEY.MAIN)
+          .map((k) => `<li>${code(k, DEWEY.MAIN[k])}${cnt(k)}<small>${escapeHtml(DEWEY.BLURB[k])}</small></li>`)
+          .join("")}</ul>
+
+        <h4>Searching by number</h4>
+        <table class="g-table g-syntax"><tbody>
+          <tr><td><code>8</code> or <code>800</code></td><td>the whole class — everything 800–899</td></tr>
+          <tr><td><code>82</code>, <code>820</code> or <code>82x</code></td><td>a division — 820–829</td></tr>
+          <tr><td><code>823</code></td><td>one section, including all its decimals</td></tr>
+          <tr><td><code>320.</code> or <code>80x</code></td><td>exactly section 320 / division 800–809 (a bare <code>320</code> means the 320s)</td></tr>
+          <tr><td><code>823.8</code></td><td>823.8 and anything more specific (823.809, 823.81…)</td></tr>
+          <tr><td><code>300-399</code></td><td>a range</td></tr>
+        </tbody></table>
+        <p>Type these in the <strong>Dewey</strong> box, or straight into the main search. Don't know the number?
+        Use <strong>Find by category</strong> to assemble it step by step, or click any code in the outline below.</p>
+
+        <h4>The literature pattern (800s)</h4>
+        <p>The second digit is the language, the third the form — the same in every language:
+        1 poetry, 2 drama, 3 fiction, 4 essays, 5 speeches, 6 letters, 7 humor &amp; satire, 8 miscellaneous.
+        Other languages live in 890s (Russian fiction is 891.73). Literature is classed by the <em>original</em> language, so a translation of Tolstoy stays in 891.73.</p>
+        ${litGrid}
+
+        <h4>Common add-ons</h4>
+        <p>Standard subdivisions can be tacked onto most numbers: ${DEWEY.STD_SUBDIVISIONS.map(([n, l]) => `<code>-${n}</code> ${escapeHtml(l.toLowerCase())}`).join(", ")}.
+        For example 509 is the history of science and 780.3 a dictionary of music.</p>
+
+        <h4>Where your numbers come from</h4>
+        <ul class="g-src">
+          <li><strong>Catalog</strong> — the number libraries assigned, from Open Library's catalog records for the edition (by ISBN) or matching editions.</li>
+          <li><strong>Estimated</strong> <code>~</code> — no catalog record, so the number is worked out from the book's subjects, genres and your category. Check these.</li>
+          <li><strong>Yours</strong> — anything you set in a book's popup always wins.</li>
+        </ul>
+
+        <h4>Full outline — 10 classes, 100 divisions, 1,000 sections</h4>
+        <p class="muted">Counts show books in your current tab. Click a number to see those books.</p>
+        <div class="g-outline">${outline}</div>
+      </div>`,
+      "wide"
+    );
+    document.querySelectorAll("#modalHost .g-code").forEach((b) =>
+      b.addEventListener("click", (e) => {
+        e.preventDefault(); // don't toggle the <details> when clicking its code
+        closeModal();
+        setDdcFilter(b.dataset.p);
+      })
+    );
+  }
+
+  /* ---------------- reading list: import more (merge, skipping duplicates) ---------------- */
+  function openReadingImportModal() {
+    openModal(`
+      <div class="mform">
+        <h3>Import into your reading list</h3>
+        <p class="pk-hint">Paste Markdown (<code>## Category</code>, then <code>- Author — _Title_</code>). Books already in your list are skipped.
+        Optionally add a Dewey number in braces: <code>- Plato — _The Republic_ {321.07}</code>.</p>
+        <div class="import"><textarea id="rmInput" spellcheck="false" placeholder="## Philosophy&#10;- Plato — _The Republic_ ✅"></textarea></div>
+        <input type="file" id="rmFile" accept=".md,.markdown,.txt,text/plain,text/markdown" hidden />
+        <div class="mform-actions">
+          <button type="button" class="btn-ghost" id="rmFileBtn">Choose file…</button>
+          <button type="button" class="btn-primary" id="rmLoad">Import</button>
+        </div>
+      </div>`);
+    const file = document.getElementById("rmFile");
+    document.getElementById("rmFileBtn").addEventListener("click", () => file.click());
+    file.addEventListener("change", () => {
+      const f = file.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => importReadingText(reader.result);
+      reader.readAsText(f);
+    });
+    document.getElementById("rmLoad").addEventListener("click", () =>
+      importReadingText(document.getElementById("rmInput").value)
+    );
+  }
+
   /* ---------------- action buttons + card clicks ---------------- */
   function updateActionButtons() {
-    document.getElementById("importMore").hidden = state.tab !== "goodreads";
+    const btn = document.getElementById("importMore");
+    const empty = currentData().length === 0; // the landing panel has its own importer
+    btn.hidden = empty;
+    btn.textContent = state.tab === "goodreads" ? "Import CSV" : "Import list";
   }
   document.getElementById("addBook").addEventListener("click", openAddForm);
   const importMoreInput = document.getElementById("importMoreInput");
-  document.getElementById("importMore").addEventListener("click", () => importMoreInput.click());
+  document.getElementById("importMore").addEventListener("click", () => {
+    if (state.tab === "goodreads") importMoreInput.click();
+    else openReadingImportModal();
+  });
   importMoreInput.addEventListener("change", () => {
     if (importMoreInput.files[0]) importCsv(importMoreInput.files[0]);
     importMoreInput.value = "";
@@ -1220,7 +2061,19 @@
   });
 
   /* ---------------- boot ---------------- */
+  READING = loadStoredReading() || (window.READING_LIST || []).map(normalize);
+  GOODREADS = loadStoredGoodreads() || (window.GOODREADS || []).map(normalize);
+  // Clean out duplicates saved before duplicate detection existed.
+  let bootRemoved = 0;
+  {
+    const r = dedupeList(READING);
+    if (r.removed) { READING = r.list; bootRemoved += r.removed; persistReading(); }
+    const g = dedupeList(GOODREADS);
+    if (g.removed) { GOODREADS = g.list; bootRemoved += g.removed; persistGoodreads(); }
+  }
+  els.sortBy.value = state.sort;
   updateActionButtons();
   buildFilters();
   render();
+  if (bootRemoved) toast(`Merged ${bootRemoved} duplicate book${bootRemoved === 1 ? "" : "s"}`);
 })();
