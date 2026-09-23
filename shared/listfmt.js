@@ -1,21 +1,14 @@
-/* Library database: library.md in this repo.
- *
- * The whole library lives in one human-readable Markdown file. This module
- * parses and writes that format and knows three ways to reach the file:
- *   - local:  `node server.js` serves the app and reads/writes library.md on disk;
- *   - github: the GitHub contents API reads library.md and commits every save
- *             (token kept only in this browser, set via the storage dialog);
- *   - static: anywhere else (e.g. GitHub Pages without a token) the file is
- *             read-only — changes last until the page is closed.
+/* Import/export formats: the Markdown list format (also the backup format)
+ * and the Goodreads library-export CSV.
  */
-window.LibraryStore = (() => {
+(function (root, factory) {
+  if (typeof module === "object" && module.exports) module.exports = factory();
+  else root.ListFormat = factory();
+})(typeof self !== "undefined" ? self : this, function () {
   "use strict";
 
-  const DB_PATH = "library.md";
-  const GH_KEY = "libraryStore.github"; // connection settings; never written to the repo
-
   /* ---------------- Markdown list parsing ----------------
-   * Hand-written lists and the database share one format:
+   * Hand-written lists and exports share one format:
    *   ## Category / ### Subcategory / #### Sub-subcategory
    *   - Author — _Title_ (note) ✅ !primary ★4 isbn:9780141439518 {823.8 catalog}
    * Section headers are never books: besides # headings, a bullet counts as a
@@ -159,12 +152,13 @@ window.LibraryStore = (() => {
     return books;
   }
 
-  /* ---------------- database file ---------------- */
+  /* ---------------- backup / export file ---------------- */
   const HEADER = `# Library
 
 <!--
-  The database for the Library app. The app keeps this file up to date, and it is
-  safe to edit by hand. Two sections: "# Reading List" and "# Goodreads".
+  Export of the Library app (the live library is its SQLite database).
+  Re-import with "Import list" or restore on a fresh server with LIBRARY_IMPORT.
+  Two sections: "# Reading List" and "# Goodreads".
   Inside each: ## Category / ### Subcategory / #### Sub-subcategory, then one book per line:
 
     - Author — _Title_ (note) ✅ !primary ★4 isbn:9780141439518 {823.8 catalog}
@@ -237,138 +231,88 @@ window.LibraryStore = (() => {
     return `${HEADER}\n# Reading List\n\n${serializeList(reading)}\n# Goodreads\n\n${serializeList(goodreads)}`.replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
   }
 
-  /* ---------------- backends ---------------- */
-  const LOCAL = {
-    kind: "local",
-    label: "library.md on this computer",
-    writable: true,
-    async load() {
-      const r = await fetch("api/library", { cache: "no-store" });
-      if (!r.ok) throw new Error(`local server ${r.status}`);
-      return r.text();
-    },
-    async save(text) {
-      const r = await fetch("api/library", {
-        method: "PUT",
-        headers: { "Content-Type": "text/markdown; charset=utf-8" },
-        body: text,
+  /* ---------------- Goodreads CSV ---------------- */
+  // Minimal RFC-4180 CSV parser (handles quotes, commas, newlines in fields)
+  function parseCsv(text) {
+    const rows = [];
+    let row = [],
+      field = "",
+      inQ = false;
+    text = text.replace(/^﻿/, "");
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (inQ) {
+        if (c === '"') {
+          if (text[i + 1] === '"') {
+            field += '"';
+            i++;
+          } else inQ = false;
+        } else field += c;
+      } else if (c === '"') inQ = true;
+      else if (c === ",") {
+        row.push(field);
+        field = "";
+      } else if (c === "\n") {
+        row.push(field);
+        rows.push(row);
+        row = [];
+        field = "";
+      } else if (c === "\r") {
+        /* ignore */
+      } else field += c;
+    }
+    if (field.length || row.length) {
+      row.push(field);
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  function parseGoodreadsCsv(text) {
+    const rows = parseCsv(text);
+    if (!rows.length) return [];
+    const head = rows[0].map((h) => h.trim());
+    const idx = (name) => head.indexOf(name);
+    const iTitle = idx("Title"),
+      iAuthor = idx("Author"),
+      iISBN13 = idx("ISBN13"),
+      iISBN = idx("ISBN"),
+      iRating = idx("My Rating"),
+      iShelf = idx("Exclusive Shelf"),
+      iShelves = idx("Bookshelves");
+    if (iTitle < 0) throw new Error("missing Title column");
+
+    const clean = (s) => (s || "").replace(/^="?|"?$/g, "").trim();
+    const out = [];
+    for (let r = 1; r < rows.length; r++) {
+      const row = rows[r];
+      if (!row || !row[iTitle]) continue;
+      const shelf = clean(row[iShelf]) || "read";
+      const isbn = clean(row[iISBN13]) || clean(row[iISBN]);
+      const shelves = clean(row[iShelves]);
+      out.push({
+        title: clean(row[iTitle]),
+        author: clean(row[iAuthor]),
+        category: prettyShelf(shelf),
+        subcategory: shelves ? shelves.split(",")[0].trim() : "",
+        read: shelf === "read",
+        primary: false,
+        rating: Number(clean(row[iRating])) || 0,
+        isbn: isbn.replace(/[^0-9Xx]/g, ""),
       });
-      if (!r.ok) throw new Error(`local server ${r.status}`);
-    },
-  };
-
-  const STATIC = {
-    kind: "static",
-    label: "library.md (read-only)",
-    writable: false,
-    async load() {
-      try {
-        const r = await fetch(DB_PATH, { cache: "no-cache" });
-        return r.ok ? r.text() : "";
-      } catch (e) {
-        return ""; // opened from file://
-      }
-    },
-    async save() {
-      throw new Error("read-only");
-    },
-  };
-
-  const b64encode = (s) => {
-    const bytes = new TextEncoder().encode(s);
-    let bin = "";
-    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-    return btoa(bin);
-  };
-  const b64decode = (b) => new TextDecoder().decode(Uint8Array.from(atob(b.replace(/\s/g, "")), (c) => c.charCodeAt(0)));
-
-  function github(cfg) {
-    const api =
-      `https://api.github.com/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}/contents/` +
-      cfg.path.split("/").map(encodeURIComponent).join("/");
-    const ref = `?ref=${encodeURIComponent(cfg.branch)}`;
-    const headers = {
-      Authorization: `Bearer ${cfg.token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    };
-    let sha = null;
-    async function load() {
-      const r = await fetch(api + ref, { headers, cache: "no-store" });
-      if (r.status === 404) {
-        sha = null;
-        return ""; // first save creates the file
-      }
-      if (!r.ok) throw new Error(r.status === 401 ? "token rejected (401)" : `GitHub ${r.status}`);
-      const j = await r.json();
-      sha = j.sha;
-      if (j.content && j.encoding === "base64") return b64decode(j.content);
-      // files over 1 MB come back without content
-      const raw = await fetch(api + ref, { headers: { ...headers, Accept: "application/vnd.github.raw" }, cache: "no-store" });
-      return raw.text();
     }
-    return {
-      kind: "github",
-      label: `${cfg.owner}/${cfg.repo} · ${cfg.path} (${cfg.branch})`,
-      writable: true,
-      load,
-      async save(text, message) {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          const body = { message, content: b64encode(text), branch: cfg.branch };
-          if (sha) body.sha = sha;
-          const r = await fetch(api, { method: "PUT", headers, body: JSON.stringify(body) });
-          if (r.ok) {
-            sha = (await r.json()).content.sha;
-            return;
-          }
-          // file changed elsewhere (another device / a hand edit): take the latest sha and write ours
-          if ((r.status === 409 || r.status === 422) && attempt === 0) {
-            await load();
-            continue;
-          }
-          throw new Error(r.status === 401 ? "token rejected (401)" : `GitHub ${r.status}`);
-        }
-      },
-    };
+    return out;
   }
 
-  function githubSettings() {
-    try {
-      return JSON.parse(localStorage.getItem(GH_KEY) || "null");
-    } catch (e) {
-      return null;
-    }
-  }
-  function setGithubSettings(cfg) {
-    try {
-      if (cfg) localStorage.setItem(GH_KEY, JSON.stringify(cfg));
-      else localStorage.removeItem(GH_KEY);
-    } catch (e) {}
-  }
-  // Sensible defaults: this repo, guessed from a GitHub Pages URL.
-  function githubDefaults() {
-    const m = location.hostname.match(/^([^.]+)\.github\.io$/i);
-    const repo = m && location.pathname.split("/").filter(Boolean)[0];
-    return { owner: m ? m[1] : "abetrs", repo: repo || "book-library", branch: "main", path: DB_PATH, token: "" };
+  function prettyShelf(s) {
+    return (
+      {
+        read: "Read",
+        "currently-reading": "Currently Reading",
+        "to-read": "To Read",
+      }[s] || (s || "Read").replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase())
+    );
   }
 
-  // Pick the backend: local server > GitHub (if connected) > read-only file.
-  async function open() {
-    try {
-      const r = await fetch("api/library", { cache: "no-store" });
-      if (r.headers.get("X-Library-Store") === "local") return { backend: LOCAL, text: r.ok ? await r.text() : "" };
-    } catch (e) {}
-    const cfg = githubSettings();
-    if (cfg && cfg.token) {
-      const gh = github(cfg);
-      try {
-        return { backend: gh, text: await gh.load() };
-      } catch (e) {
-        return { backend: STATIC, text: await STATIC.load(), error: `Couldn't reach GitHub: ${e.message}` };
-      }
-    }
-    return { backend: STATIC, text: await STATIC.load() };
-  }
-
-  return { open, parseList, parseDatabase, serialize, github, githubSettings, setGithubSettings, githubDefaults };
-})();
+  return { parseList, parseDatabase, serialize, parseCsv, parseGoodreadsCsv, prettyShelf };
+});

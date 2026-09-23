@@ -1,3 +1,12 @@
+# Runtime data (SQLite database + cached images)
+/data/
+
+# Dependencies
+node_modules/
+
+# Local settings
+.env
+
 # OS
 .DS_Store
 Thumbs.db
@@ -10,4 +19,3 @@ desktop.ini
 
 # Logs
 *.log
-library.md.tmp
