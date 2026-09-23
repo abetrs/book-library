@@ -1,7 +1,8 @@
 /* Library — minimalist reading dashboard
- * Two datasets: window.READING_LIST (curated) and window.GOODREADS (imported CSV).
- * Books are organized by Dewey Decimal Classification (window.DEWEY). Covers,
- * DDC numbers and genres are fetched lazily from Open Library and cached in localStorage.
+ * Two lists: the curated Reading List and the Goodreads library (imported CSV).
+ * Books are organized by Dewey Decimal Classification (window.DEWEY). The library
+ * itself lives in library.md in the repo (see store.js); covers, genres and summaries
+ * are fetched lazily from Open Library and cached in localStorage.
  */
 (() => {
   "use strict";
@@ -46,6 +47,7 @@
       subsubcategory: b.subsubcategory || "",
       read: !!b.read,
       primary: !!b.primary,
+      custom: !!b.custom, // not a catalogued book: never looked up by title
       rating: b.rating || 0,
       isbn: b.isbn || "",
       note: b.note || "",
@@ -655,6 +657,8 @@
   }
 
   async function resolveMeta(b) {
+    // custom entries aren't real catalog books: a title search would find the wrong one
+    if (b.custom) return { g: [], d: estimateDdc(b, [], [], []), e: true, ok: false };
     const isbn = (b.isbn || "").replace(/[^0-9Xx]/g, "");
     const cands = [];
     let subjects = [];
@@ -720,9 +724,11 @@
 
   function applyMeta(b, m) {
     b.genres = m.g || [];
-    if (b.ddcSrc !== "manual") {
-      b.ddc = m.d || "";
-      b.ddcSrc = m.d ? (m.e ? "est" : "ol") : "";
+    // never replace your number, and never trade a catalog number for a guess
+    const keep = b.ddcSrc === "manual" || !m.d || (b.ddcSrc === "ol" && m.e);
+    if (!keep) {
+      b.ddc = m.d;
+      b.ddcSrc = m.e ? "est" : "ol";
     }
     b._c = true;
   }
@@ -752,6 +758,8 @@
       if (m !== undefined) {
         applyMeta(b, m);
         assigned = true;
+      } else if (b.ddc) {
+        b._c = true; // already numbered in library.md; genres load when the book is opened
       } else {
         b._q = true;
         classJobs++;
@@ -762,6 +770,7 @@
       scheduleChipRefresh();
       schedulePersist();
     }
+    if (!assigned && data.every((b) => b._c)) scheduleChipRefresh();
   }
 
   async function loadClass(b) {
@@ -790,13 +799,9 @@
     }, 400);
   }
 
-  let persistT;
+  // Classification results are batched into one save (one commit on GitHub).
   function schedulePersist() {
-    clearTimeout(persistT);
-    persistT = setTimeout(() => {
-      if (READING.length) persistReading();
-      if (GOODREADS.length) persistGoodreads();
-    }, 1200);
+    persist("Update Dewey numbers", 10000);
   }
 
   /* ---------------- Dewey chips: class › division › section drill-down ---------------- */
@@ -1028,7 +1033,7 @@
         dup++;
         continue;
       }
-      const n = fresh ? normalize(nb, id++) : nb;
+      const n = fresh ? normalize({ ...nb, id: null }, id++) : nb; // fresh ids: never collide
       target.push(n);
       for (const k of bookKeys(n)) if (!idx.has(k)) idx.set(k, n);
       added++;
@@ -1048,18 +1053,11 @@
 
   function importGoodreadsBooks(books) {
     const r = mergeBooks(GOODREADS, books);
-    persistGoodreads();
+    if (r.added) persist(`Import ${r.added} book${r.added === 1 ? "" : "s"} from Goodreads`);
+    else if (r.dup) persist("Update Goodreads library");
     buildFilters();
     render();
     importToast(r);
-  }
-
-  function loadStoredGoodreads() {
-    try {
-      const raw = localStorage.getItem("goodreads.v1");
-      if (raw) return JSON.parse(raw).map(normalize);
-    } catch (e) {}
-    return null;
   }
 
   /* ---------------- reading list import (paste Markdown) ---------------- */
@@ -1098,8 +1096,8 @@
           </svg>
           <h1>Library</h1>
           <p class="tagline">A minimalist dashboard for your reading. Build a reading list and browse your
-          Goodreads library — search, filter by genre, and see every cover. Everything runs in your
-          browser; nothing is uploaded.</p>
+          Goodreads library — shelved and searchable by Dewey Decimal number, with every cover. Everything
+          is saved to <code>library.md</code> in this repo.</p>
           <ol class="how">
             <li><span class="step">1</span><div><strong>Build a reading list</strong>Paste a Markdown list below, or load the sample to see how it works.</div></li>
             <li><span class="step">2</span><div><strong>Import Goodreads</strong>Open the Goodreads tab and drop your library export CSV — genres are tagged automatically.</div></li>
@@ -1160,97 +1158,18 @@
   }
 
   function importReadingText(text) {
-    const books = parseReadingMarkdown(text || "");
+    const books = LibraryStore.parseList(text || "");
     if (!books.length) {
       alert("No books found. Use lines like:  - Author — _Title_  under a ## Category heading.");
       return;
     }
     const r = mergeBooks(READING, books);
-    persistReading();
+    if (r.added) persist(`Import ${r.added} book${r.added === 1 ? "" : "s"} into Reading List`);
+    else if (r.dup) persist("Update Reading List");
     closeModal();
     buildFilters();
     render();
     importToast(r);
-  }
-
-  function loadStoredReading() {
-    try {
-      const raw = localStorage.getItem("readinglist.v1");
-      if (raw) return JSON.parse(raw).map(normalize);
-    } catch (e) {}
-    return null;
-  }
-
-  function cleanReadingTitle(t) {
-    t = (t || "").trim();
-    let note = "";
-    const m = t.match(/\s*\(([^()]*)\)\s*$/);
-    if (m) {
-      note = m[1].trim();
-      t = t.slice(0, m.index).trim();
-    }
-    t = t.replace(/[_*]/g, "").trim().replace(/^["']|["']$/g, "").trim();
-    return { title: t, note };
-  }
-
-  function parseReadingMarkdown(text) {
-    let cat = "",
-      sub = "",
-      subsub = "";
-    const books = [];
-    for (const raw of String(text).split(/\r?\n/)) {
-      const line = raw.replace(/\s+$/, "");
-      if (line.startsWith("#### ")) {
-        subsub = line.slice(5).trim();
-        continue;
-      }
-      if (line.startsWith("### ")) {
-        sub = line.slice(4).trim();
-        subsub = "";
-        continue;
-      }
-      if (line.startsWith("## ")) {
-        cat = line.slice(3).trim();
-        sub = subsub = "";
-        continue;
-      }
-      if (line.startsWith("# ")) {
-        cat = line.slice(2).trim();
-        sub = subsub = "";
-        continue;
-      }
-      const m = line.match(/^\s*[-*]\s+(.*)$/);
-      if (!m) continue;
-      let item = m[1].trim();
-      if (!item) continue;
-      const read = item.includes("✅") || /\[x\]/i.test(item);
-      const primary = /!primary/i.test(item);
-      const dm = item.match(/\{\s*(\d{3}(?:\.\d+)?)\s*\}/); // optional Dewey number: {823.8}
-      item = item.replace(/✅/g, "").replace(/!primary/gi, "").replace(/\{[^}]*\}/g, "").replace(/^\[[ xX]\]\s*/, "").trim();
-      let author = "";
-      let parsed;
-      const split = item.match(/^(.*?)\s[—–-]\s(.*)$/); // "Author — Title" (em/en/hyphen)
-      if (split) {
-        author = split[1].trim();
-        parsed = cleanReadingTitle(split[2]);
-      } else {
-        parsed = cleanReadingTitle(item);
-      }
-      if (!parsed.title) continue;
-      books.push({
-        title: parsed.title,
-        author,
-        category: cat || "Uncategorized",
-        subcategory: sub,
-        subsubcategory: subsub,
-        read,
-        primary,
-        ddc: dm ? dm[1] : "",
-        note: parsed.note,
-        id: books.length,
-      });
-    }
-    return books;
   }
 
   // Minimal RFC-4180 CSV parser (handles quotes, commas, newlines in fields)
@@ -1414,18 +1333,226 @@
     return escapeHtml(s).replace(/"/g, "&quot;");
   }
 
+  /* ---------------- saving to library.md ----------------
+   * Every change is written back to library.md through the backend store.js
+   * picked (local server / GitHub commit / read-only). Saves are debounced and
+   * coalesced; identical content is never re-saved.
+   */
+  const store = { backend: null, error: "" };
+  let savedText = ""; // what library.md holds right now
+  let saveT = null,
+    saveDue = 0,
+    saving = false,
+    saveAgain = false,
+    saveState = "saved";
+  const saveReasons = new Set();
+
+  function persist(reason = "Update library", delay = 1500) {
+    saveReasons.add(reason);
+    refreshSaveLabel();
+    if (!store.backend || !store.backend.writable) return;
+    const due = Date.now() + delay;
+    if (!saveT || due < saveDue) {
+      clearTimeout(saveT);
+      saveDue = due;
+      saveT = setTimeout(flushSave, delay);
+    }
+  }
+  // Say "unsaved" only when library.md would actually change (background
+  // classification often re-confirms numbers the file already has).
+  let labelT;
+  function refreshSaveLabel() {
+    clearTimeout(labelT);
+    labelT = setTimeout(() => {
+      if (saveState === "saving" || saveState === "error") return;
+      const dirty = isDirty();
+      if (!store.backend.writable) setSaveState(dirty ? "readonly" : "saved");
+      else setSaveState(dirty ? "pending" : "saved");
+    }, 300);
+  }
+
+  async function flushSave() {
+    clearTimeout(saveT);
+    saveT = null;
+    if (!store.backend || !store.backend.writable) return;
+    if (saving) {
+      saveAgain = true;
+      return;
+    }
+    const text = LibraryStore.serialize({ reading: READING, goodreads: GOODREADS });
+    const reasons = [...saveReasons];
+    saveReasons.clear();
+    if (text === savedText) return setSaveState("saved");
+    const message =
+      reasons.length <= 1
+        ? reasons[0] || "Update library"
+        : `Update library: ${reasons.slice(0, 3).join("; ")}${reasons.length > 3 ? ` (+${reasons.length - 3} more)` : ""}`;
+    saving = true;
+    setSaveState("saving");
+    try {
+      await store.backend.save(text, message);
+      savedText = text;
+      store.error = "";
+      setSaveState("saved");
+      dropLegacyStorage();
+    } catch (e) {
+      reasons.forEach((r) => saveReasons.add(r));
+      store.error = e.message;
+      setSaveState("error");
+    }
+    saving = false;
+    if (saveAgain) {
+      saveAgain = false;
+      flushSave();
+    }
+  }
+
+  function isDirty() {
+    return LibraryStore.serialize({ reading: READING, goodreads: GOODREADS }) !== savedText;
+  }
+
+  function setSaveState(st) {
+    saveState = st;
+    const btn = document.getElementById("storeBtn");
+    if (!btn || !store.backend) return;
+    const where = { local: "library.md", github: "library.md on GitHub", static: "library.md" }[store.backend.kind];
+    btn.textContent = {
+      saved: `Saved · ${where}`,
+      pending: "Unsaved changes…",
+      saving: "Saving…",
+      error: "Save failed — click for details",
+      readonly: "Read-only — changes aren't saved",
+    }[st];
+    if (st === "saved" && store.backend.kind === "static") btn.textContent = "Read-only · connect to save";
+    btn.classList.toggle("warn", st === "error" || st === "readonly");
+  }
+
+  window.addEventListener("beforeunload", (e) => {
+    if (saveState === "pending") flushSave();
+    if (saveState === "pending" || saveState === "saving" || saveState === "error" || (saveState === "readonly" && isDirty())) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+
+  // One-time move of lists that older versions kept in this browser's localStorage.
+  const LEGACY_KEYS = ["readinglist.v1", "goodreads.v1"];
+  let legacyMoved = false;
+  function legacyLists() {
+    const read = (k) => {
+      try {
+        const v = JSON.parse(localStorage.getItem(k) || "null");
+        return Array.isArray(v) ? v : [];
+      } catch (e) {
+        return [];
+      }
+    };
+    return { reading: read(LEGACY_KEYS[0]), goodreads: read(LEGACY_KEYS[1]) };
+  }
+  function dropLegacyStorage() {
+    if (!legacyMoved) return;
+    try {
+      LEGACY_KEYS.forEach((k) => localStorage.removeItem(k));
+    } catch (e) {}
+    legacyMoved = false;
+  }
+
+  function downloadLibrary() {
+    const text = LibraryStore.serialize({ reading: READING, goodreads: GOODREADS });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/markdown" }));
+    a.download = "library.md";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function openStorageDialog() {
+    const kind = store.backend.kind;
+    const cfg = { ...LibraryStore.githubDefaults(), ...(LibraryStore.githubSettings() || {}) };
+    const now = {
+      local: "Saving straight into <code>library.md</code> in your repo folder (local server).",
+      github: `Committing every change to <code>${escapeHtml(cfg.path)}</code> in <strong>${escapeHtml(cfg.owner)}/${escapeHtml(cfg.repo)}</strong> (${escapeHtml(cfg.branch)}).`,
+      static: "Reading <code>library.md</code> from this site. <strong>Changes you make here aren't saved.</strong>",
+    }[kind];
+    openModal(
+      `<div class="mform storage">
+        <h3>Where your library is saved</h3>
+        <p class="st-now">${now}</p>
+        ${store.error ? `<p class="st-err">Last error: ${escapeHtml(store.error)}</p>` : ""}
+        <p class="pk-hint">Your whole library is one Markdown file, <code>library.md</code>, in the repo — readable on GitHub and safe to edit by hand.</p>
+        <h4>On your computer</h4>
+        <p class="pk-hint">Run <code>node server.js</code> in the repo folder and open <code>http://localhost:8000</code>. Every change is written straight into <code>library.md</code>; commit it whenever you like.</p>
+        ${kind === "local" ? "" : `
+        <h4>Anywhere — commit through GitHub</h4>
+        <p class="pk-hint">Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a>
+        for just this repository with <strong>Contents: Read and write</strong>. It's kept only in this browser, never in the repo.
+        Each save becomes a commit to <code>library.md</code>.</p>
+        <div class="st-grid">
+          <label>Owner<input type="text" id="ghOwner" value="${attr(cfg.owner)}" autocomplete="off" spellcheck="false" /></label>
+          <label>Repository<input type="text" id="ghRepo" value="${attr(cfg.repo)}" autocomplete="off" spellcheck="false" /></label>
+          <label>Branch<input type="text" id="ghBranch" value="${attr(cfg.branch)}" autocomplete="off" spellcheck="false" /></label>
+          <label>File<input type="text" id="ghPath" value="${attr(cfg.path)}" autocomplete="off" spellcheck="false" /></label>
+        </div>
+        <label>Token<input type="password" id="ghToken" value="${attr(cfg.token || "")}" placeholder="github_pat_…" autocomplete="off" spellcheck="false" /></label>`}
+        <div class="mform-actions">
+          <button type="button" class="btn-ghost" id="stDownload">Download library.md</button>
+          ${store.error ? '<button type="button" class="btn-ghost" id="stRetry">Retry save</button>' : ""}
+          ${kind === "github" ? '<button type="button" class="btn-ghost" id="stDisconnect">Disconnect</button>' : ""}
+          ${kind === "local" ? "" : `<button type="button" class="btn-primary" id="stConnect">${kind === "github" ? "Save settings" : "Connect"}</button>`}
+        </div>
+      </div>`
+    );
+    document.getElementById("stDownload").addEventListener("click", downloadLibrary);
+    const retry = document.getElementById("stRetry");
+    if (retry) retry.addEventListener("click", () => { closeModal(); flushSave(); });
+    const disc = document.getElementById("stDisconnect");
+    if (disc)
+      disc.addEventListener("click", () => {
+        if (isDirty() && !confirm("Some changes haven't been saved yet. Disconnect anyway?")) return;
+        LibraryStore.setGithubSettings(null);
+        location.reload();
+      });
+    const conn = document.getElementById("stConnect");
+    if (conn)
+      conn.addEventListener("click", async () => {
+        const val = (id) => document.getElementById(id).value.trim();
+        const next = { owner: val("ghOwner"), repo: val("ghRepo"), branch: val("ghBranch") || "main", path: val("ghPath") || "library.md", token: val("ghToken") };
+        if (!next.owner || !next.repo || !next.token) return toast("Owner, repository and token are required");
+        conn.disabled = true;
+        conn.textContent = "Connecting…";
+        const gh = LibraryStore.github(next);
+        let text;
+        try {
+          text = await gh.load();
+        } catch (e) {
+          conn.disabled = false;
+          conn.textContent = "Connect";
+          return toast(`Couldn't connect: ${e.message}`);
+        }
+        LibraryStore.setGithubSettings(next);
+        store.backend = gh;
+        store.error = "";
+        const db = LibraryStore.parseDatabase(text);
+        savedText = text;
+        if (db.reading.length || db.goodreads.length) {
+          // the repo copy wins; anything only in this browser is merged in
+          const localR = READING, localG = GOODREADS;
+          READING = db.reading.map(normalize);
+          GOODREADS = db.goodreads.map(normalize);
+          const r = mergeBooks(READING, localR).added + mergeBooks(GOODREADS, localG).added;
+          if (r) persist(`Add ${r} book${r === 1 ? "" : "s"} from this browser`);
+        } else if (READING.length || GOODREADS.length) {
+          persist("Create library.md", 0);
+        }
+        setSaveState(isDirty() ? "pending" : "saved");
+        closeModal();
+        buildFilters();
+        render();
+        toast(`Connected to ${next.owner}/${next.repo}`);
+      });
+  }
+
   /* ---------------- data mutations (add / delete) ---------------- */
-  function persist() {
-    if (state.tab === "reading") persistReading();
-    else persistGoodreads();
-  }
-  // Transient fields (_c, _q, genres) are dropped: normalize() whitelists on load.
-  function persistReading() {
-    try { localStorage.setItem("readinglist.v1", JSON.stringify(READING)); } catch (e) {}
-  }
-  function persistGoodreads() {
-    try { localStorage.setItem("goodreads.v1", JSON.stringify(GOODREADS)); } catch (e) {}
-  }
   function nextId(arr) {
     return arr.reduce((m, b) => Math.max(m, b.id || 0), -1) + 1;
   }
@@ -1437,7 +1564,7 @@
     const i = arr.findIndex((b) => String(b.id) === String(id));
     if (i < 0) return;
     const [removed] = arr.splice(i, 1);
-    persist();
+    persist(`Remove “${removed.title}”`);
     buildFilters();
     render();
     toast(`Removed “${removed.title}”`);
@@ -1447,7 +1574,7 @@
     const existing = findIn(makeIndex(arr), data);
     if (existing) {
       mergeInto(existing, data);
-      persist();
+      persist(`Update “${existing.title}”`);
       toast(`“${existing.title}” is already in your library`);
       render();
       openDetail(existing.id);
@@ -1455,7 +1582,7 @@
     }
     const b = normalize(data, nextId(arr));
     arr.unshift(b);
-    persist();
+    persist(`Add “${b.title}”`);
     buildFilters();
     render();
     toast(`Added “${b.title}”`);
@@ -1580,6 +1707,7 @@
     const tags = detailTags(b);
     const meta = [b.read ? "✓ Read" : "Unread"];
     if (b.primary) meta.push("Primary source");
+    if (b.custom) meta.push("Custom book");
     if (b.rating) meta.push("★ " + b.rating + "/5");
     openModal(`
       <div class="detail">
@@ -1650,7 +1778,7 @@
         b._c = false;
         renderDetailDdc(b);
         applyMeta(b, await getMeta(b));
-        persist();
+        persist(`Reset Dewey number of “${b.title}”`);
         render();
         if (modalBookId === b.id) renderDetailDdc(b);
       });
@@ -1660,7 +1788,7 @@
     b.ddc = n;
     b.ddcSrc = "manual";
     b._c = true;
-    persist();
+    persist(`File “${b.title}” under ${n}`);
     buildDdcChips(currentData());
     render();
     toast(`Filed “${b.title}” under ${n}`);
@@ -1706,50 +1834,264 @@
     }
   }
 
-  function openAddForm() {
+  /* ---------------- add a book: ISBN autofill + "did you mean" ---------------- */
+  function isValidIsbn(d) {
+    if (/^\d{9}[\dX]$/.test(d)) {
+      let sum = 0;
+      for (let i = 0; i < 10; i++) sum += (d[i] === "X" ? 10 : +d[i]) * (10 - i);
+      return sum % 11 === 0;
+    }
+    if (/^\d{13}$/.test(d)) {
+      let sum = 0;
+      for (let i = 0; i < 13; i++) sum += +d[i] * (i % 2 ? 3 : 1);
+      return sum % 10 === 0;
+    }
+    return false;
+  }
+
+  // ISBN -> {title, author, year, cover}. Open Library first, Google Books as a fallback.
+  async function lookupIsbn(isbn) {
+    try {
+      const p = new URLSearchParams({ q: `isbn:${isbn}`, limit: "1", fields: "title,author_name,first_publish_year,cover_i" });
+      const r = await fetch(`https://openlibrary.org/search.json?${p}`);
+      if (r.ok) {
+        const d = ((await r.json()).docs || [])[0];
+        if (d && d.title)
+          return {
+            title: d.title,
+            author: (d.author_name || [])[0] || "",
+            year: d.first_publish_year || "",
+            cover: d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-S.jpg` : "",
+          };
+      }
+    } catch (e) {}
+    try {
+      const r = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}&maxResults=1`);
+      if (r.ok) {
+        const v = (((await r.json()).items || [])[0] || {}).volumeInfo;
+        if (v && v.title) return googleBook(v);
+      }
+    } catch (e) {}
+    return null;
+  }
+  function googleBook(v) {
+    const ids = v.industryIdentifiers || [];
+    const isbn = (ids.find((i) => i.type === "ISBN_13") || ids.find((i) => i.type === "ISBN_10") || {}).identifier || "";
+    return {
+      title: v.title,
+      author: (v.authors || [])[0] || "",
+      year: (v.publishedDate || "").slice(0, 4),
+      cover: ((v.imageLinks || {}).smallThumbnail || "").replace(/^http:/, "https:"),
+      isbn,
+    };
+  }
+
+  // Real books matching what was typed. {list, reached} — reached=false when offline.
+  async function searchBooks(title, author) {
+    const list = [];
+    let reached = false;
+    try {
+      const p = new URLSearchParams({ q: `${title} ${author}`.trim(), limit: "8", fields: "title,author_name,first_publish_year,cover_i,edition_count" });
+      const r = await fetch(`https://openlibrary.org/search.json?${p}`);
+      if (r.ok) {
+        reached = true;
+        for (const d of (await r.json()).docs || [])
+          if (d.title)
+            list.push({
+              title: d.title,
+              author: (d.author_name || [])[0] || "",
+              year: d.first_publish_year || "",
+              cover: d.cover_i ? `https://covers.openlibrary.org/b/id/${d.cover_i}-S.jpg` : "",
+              isbn: "",
+            });
+      }
+    } catch (e) {}
+    // Google Books copes better with typos; use it when Open Library comes up short.
+    if (list.length < 4) {
+      try {
+        const q = [title && `intitle:${title}`, author && `inauthor:${author}`].filter(Boolean).join(" ");
+        let r = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(q)}&maxResults=8&printType=books`);
+        let items = r.ok ? (await r.json()).items || [] : [];
+        if (r.ok) reached = true;
+        if (!items.length) {
+          r = await fetch(`https://www.googleapis.com/books/v1/volumes?q=${encodeURIComponent(`${title} ${author}`.trim())}&maxResults=8&printType=books`);
+          items = r.ok ? (await r.json()).items || [] : [];
+        }
+        for (const it of items) if (it.volumeInfo && it.volumeInfo.title) list.push(googleBook(it.volumeInfo));
+      } catch (e) {}
+    }
+    // one row per book
+    const seen = new Set();
+    const uniq = list.filter((c) => {
+      const k = surname(c.author) + "|" + normTitle(c.title);
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    return { list: uniq.slice(0, 8), reached };
+  }
+
+  function openAddForm(prefill = {}) {
     const gr = state.tab === "goodreads";
+    const hint = (t) => `<span style="text-transform:none;letter-spacing:normal;color:var(--faint)">— ${t}</span>`;
     openModal(`
-      <form class="mform" id="addForm">
+      <form class="mform" id="addForm" novalidate>
         <h3>Add a book${gr ? " to your Goodreads library" : " to your reading list"}</h3>
-        <label>Title<input type="text" id="fTitle" required autocomplete="off" spellcheck="false" /></label>
+        <label>ISBN ${hint("paste one to fill in the title and author")}<input type="text" id="fIsbn" inputmode="numeric" autocomplete="off" spellcheck="false" /></label>
+        <div class="isbn-status" id="fIsbnStatus" hidden></div>
+        <label>Title<input type="text" id="fTitle" autocomplete="off" spellcheck="false" /></label>
         <label>Author<input type="text" id="fAuthor" autocomplete="off" spellcheck="false" /></label>
-        <label>ISBN <span style="text-transform:none;letter-spacing:normal;color:var(--faint)">— optional, improves cover &amp; genres</span><input type="text" id="fIsbn" autocomplete="off" spellcheck="false" /></label>
         ${gr
           ? `<label>Shelf<select id="fShelf"><option value="read">Read</option><option value="to-read">To Read</option><option value="currently-reading">Currently Reading</option></select></label>`
           : `<label>Category<input type="text" id="fCat" placeholder="e.g. Philosophy" autocomplete="off" spellcheck="false" /></label>
              <label class="row-check"><input type="checkbox" id="fRead" /> I've read this</label>`}
-        <label>Dewey number <span style="text-transform:none;letter-spacing:normal;color:var(--faint)">— optional, looked up automatically if blank</span><input type="text" id="fDdc" placeholder="e.g. 823.8" inputmode="decimal" autocomplete="off" spellcheck="false" /></label>
+        <label>Dewey number ${hint("optional, looked up automatically if blank")}<input type="text" id="fDdc" placeholder="e.g. 823.8" inputmode="decimal" autocomplete="off" spellcheck="false" /></label>
         <div class="mform-actions">
           <button type="button" class="btn-ghost" id="fCancel">Cancel</button>
-          <button type="submit" class="btn-primary">Add book</button>
+          <button type="submit" class="btn-primary" id="fSubmit">Add book</button>
         </div>
       </form>`);
-    document.getElementById("fCancel").addEventListener("click", closeModal);
-    document.getElementById("addForm").addEventListener("submit", (e) => {
-      e.preventDefault();
-      const title = document.getElementById("fTitle").value.trim();
-      if (!title) return;
-      const author = document.getElementById("fAuthor").value.trim();
-      const isbn = document.getElementById("fIsbn").value.replace(/[^0-9Xx]/g, "");
-      const ddcRaw = document.getElementById("fDdc").value.trim();
-      const ddc = cleanDdc(ddcRaw);
-      if (ddcRaw && !ddc) {
-        document.getElementById("fDdc").classList.add("bad");
-        return;
-      }
-      let data;
-      if (gr) {
-        const shelf = document.getElementById("fShelf").value;
-        data = { title, author, isbn, category: prettyShelf(shelf), read: shelf === "read", rating: 0 };
-      } else {
-        const category = document.getElementById("fCat").value.trim() || "Uncategorized";
-        data = { title, author, isbn, category, read: document.getElementById("fRead").checked, primary: false };
-      }
-      if (ddc) Object.assign(data, { ddc, ddcSrc: "manual" });
-      closeModal();
-      addBookToCurrent(data);
+    const $ = (id) => document.getElementById(id);
+    for (const [id, v] of Object.entries(prefill)) {
+      const el = $(id);
+      if (!el) continue;
+      if (el.type === "checkbox") el.checked = !!v;
+      else el.value = v;
+    }
+    $("fCancel").addEventListener("click", closeModal);
+
+    // ISBN autofill: fires as soon as a complete, valid ISBN is pasted or typed.
+    let verified = null; // {title, author} confirmed by the ISBN lookup
+    let seq = 0;
+    const status = $("fIsbnStatus");
+    const showStatus = (html) => {
+      status.hidden = !html;
+      status.innerHTML = html || "";
+    };
+    const onIsbn = async () => {
+      const isbn = $("fIsbn").value.replace(/[^0-9Xx]/g, "").toUpperCase();
+      const mine = ++seq;
+      verified = null;
+      if (isbn.length < 10) return showStatus("");
+      if (!isValidIsbn(isbn)) return showStatus(isbn.length >= 13 || (isbn.length === 10 && !/^97[89]/.test(isbn)) ? "That doesn't look like a valid ISBN." : "");
+      showStatus('<span class="muted">Looking up ISBN…</span>');
+      const hit = await lookupIsbn(isbn);
+      if (mine !== seq || !$("fIsbn")) return;
+      if (!hit) return showStatus("No book found for this ISBN — fill in the details yourself.");
+      $("fTitle").value = hit.title;
+      $("fAuthor").value = hit.author;
+      verified = { title: hit.title, author: hit.author };
+      showStatus(
+        `${hit.cover ? `<img src="${attr(hit.cover)}" alt="" onerror="this.remove()" />` : ""}<div><strong>${escapeHtml(hit.title)}</strong><br />${escapeHtml(
+          hit.author || "Unknown author"
+        )}${hit.year ? ` · ${escapeHtml(String(hit.year))}` : ""}<br /><span class="muted">Filled in from the ISBN ✓</span></div>`
+      );
+    };
+    let isbnT;
+    $("fIsbn").addEventListener("input", () => {
+      clearTimeout(isbnT);
+      isbnT = setTimeout(onIsbn, 150);
     });
-    setTimeout(() => { const t = document.getElementById("fTitle"); if (t) t.focus(); }, 30);
+
+    const readForm = () => {
+      const ddcRaw = $("fDdc").value.trim();
+      const ddc = cleanDdc(ddcRaw);
+      const base = {
+        title: $("fTitle").value.trim(),
+        author: $("fAuthor").value.trim(),
+        isbn: $("fIsbn").value.replace(/[^0-9Xx]/g, ""),
+      };
+      if (gr) {
+        const shelf = $("fShelf").value;
+        Object.assign(base, { category: prettyShelf(shelf), read: shelf === "read", rating: 0 });
+      } else {
+        Object.assign(base, { category: $("fCat").value.trim() || "Uncategorized", read: $("fRead").checked, primary: false });
+      }
+      if (ddc) Object.assign(base, { ddc, ddcSrc: "manual" });
+      return { data: base, ddcRaw, ddcOk: !ddcRaw || !!ddc };
+    };
+    const snapshot = () => {
+      const p = { fIsbn: $("fIsbn").value, fTitle: $("fTitle").value, fAuthor: $("fAuthor").value, fDdc: $("fDdc").value };
+      if (gr) p.fShelf = $("fShelf").value;
+      else Object.assign(p, { fCat: $("fCat").value, fRead: $("fRead").checked });
+      return p;
+    };
+
+    $("addForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const { data, ddcOk } = readForm();
+      if (!ddcOk) return $("fDdc").classList.add("bad");
+      if (!data.title) {
+        $("fTitle").classList.add("bad");
+        return $("fTitle").focus();
+      }
+      // Confirmed by ISBN and untouched since: add as is.
+      if (verified && verified.title === data.title && verified.author === data.author) {
+        closeModal();
+        return addBookToCurrent(data);
+      }
+      const btn = $("fSubmit");
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      const form = snapshot();
+      const { list, reached } = await searchBooks(data.title, data.author);
+      if (!$("addForm")) return; // closed meanwhile
+      if (!reached) {
+        closeModal();
+        toast("Couldn't reach the book catalog — added as typed");
+        return addBookToCurrent(data);
+      }
+      const exact = list.find(
+        (c) => normTitle(c.title) === normTitle(data.title) && (!data.author || surname(c.author) === surname(data.author))
+      );
+      if (exact) {
+        if (!data.author) data.author = exact.author; // fill a missing author from the match
+        closeModal();
+        return addBookToCurrent(data);
+      }
+      openMatchPicker(data, list, form);
+    });
+    setTimeout(() => { const t = $(prefill.fTitle ? "fTitle" : "fIsbn"); if (t) t.focus(); }, 30);
+  }
+
+  // Nothing matched exactly: show real books to pick from, or keep it as a custom entry.
+  function openMatchPicker(data, list, form) {
+    const typed = `“${escapeHtml(data.title)}”${data.author ? ` by ${escapeHtml(data.author)}` : ""}`;
+    openModal(
+      `<div class="mform">
+        <h3>${list.length ? "Did you mean…" : "No matching book found"}</h3>
+        <p class="pk-hint">${
+          list.length
+            ? `Couldn't find ${typed} exactly. Pick the book you meant, or keep yours as a custom book.`
+            : `Nothing in the catalogs matches ${typed}. You can go back and fix it, or add it as a custom book.`
+        }</p>
+        <div class="cand-list">${list
+          .map(
+            (c, i) => `<button type="button" class="cand" data-i="${i}">
+              <span class="cand-cover">${c.cover ? `<img src="${attr(c.cover)}" alt="" loading="lazy" onerror="this.remove()" />` : ""}</span>
+              <span class="cand-txt"><strong>${escapeHtml(c.title)}</strong><span>${escapeHtml(c.author || "Unknown author")}${
+                c.year ? ` · ${escapeHtml(String(c.year))}` : ""
+              }</span></span></button>`
+          )
+          .join("")}</div>
+        <div class="mform-actions">
+          <button type="button" class="btn-ghost" id="mBack">Back to edit</button>
+          <button type="button" class="${list.length ? "btn-ghost" : "btn-primary"}" id="mCustom">Add as custom book</button>
+        </div>
+      </div>`
+    );
+    document.querySelectorAll("#modalHost .cand").forEach((el) =>
+      el.addEventListener("click", () => {
+        const c = list[+el.dataset.i];
+        closeModal();
+        addBookToCurrent({ ...data, title: c.title, author: c.author || data.author, isbn: data.isbn || c.isbn || "" });
+      })
+    );
+    document.getElementById("mBack").addEventListener("click", () => openAddForm(form));
+    document.getElementById("mCustom").addEventListener("click", () => {
+      closeModal();
+      addBookToCurrent({ ...data, custom: true });
+    });
   }
 
   /* ---------------- toast ---------------- */
@@ -2061,19 +2403,44 @@
   });
 
   /* ---------------- boot ---------------- */
-  READING = loadStoredReading() || (window.READING_LIST || []).map(normalize);
-  GOODREADS = loadStoredGoodreads() || (window.GOODREADS || []).map(normalize);
-  // Clean out duplicates saved before duplicate detection existed.
-  let bootRemoved = 0;
-  {
-    const r = dedupeList(READING);
-    if (r.removed) { READING = r.list; bootRemoved += r.removed; persistReading(); }
-    const g = dedupeList(GOODREADS);
-    if (g.removed) { GOODREADS = g.list; bootRemoved += g.removed; persistGoodreads(); }
-  }
+  document.getElementById("storeBtn").addEventListener("click", openStorageDialog);
   els.sortBy.value = state.sort;
-  updateActionButtons();
-  buildFilters();
-  render();
-  if (bootRemoved) toast(`Merged ${bootRemoved} duplicate book${bootRemoved === 1 ? "" : "s"}`);
+  (async () => {
+    const opened = await LibraryStore.open();
+    store.backend = opened.backend;
+    savedText = opened.text;
+    const db = LibraryStore.parseDatabase(opened.text);
+    READING = db.reading.map(normalize);
+    GOODREADS = db.goodreads.map(normalize);
+    const notes = [];
+
+    // Books older versions kept in this browser move into library.md.
+    const legacy = legacyLists();
+    if (legacy.reading.length || legacy.goodreads.length) {
+      const moved = mergeBooks(READING, legacy.reading).added + mergeBooks(GOODREADS, legacy.goodreads).added;
+      legacyMoved = true;
+      if (moved) {
+        persist(`Move ${moved} book${moved === 1 ? "" : "s"} from browser storage into library.md`, 0);
+        notes.push(`Moved ${moved} book${moved === 1 ? "" : "s"} from this browser into library.md`);
+      } else dropLegacyStorage();
+    }
+    // Duplicates (e.g. from hand edits) are merged.
+    let removed = 0;
+    const r = dedupeList(READING);
+    if (r.removed) [READING, removed] = [r.list, removed + r.removed];
+    const g = dedupeList(GOODREADS);
+    if (g.removed) [GOODREADS, removed] = [g.list, removed + g.removed];
+    if (removed) {
+      persist("Merge duplicate books", 0);
+      notes.push(`Merged ${removed} duplicate book${removed === 1 ? "" : "s"}`);
+    }
+
+    setSaveState("saved");
+    refreshSaveLabel();
+    updateActionButtons();
+    buildFilters();
+    render();
+    if (opened.error) notes.unshift(opened.error);
+    if (notes.length) toast(notes.join(" · "));
+  })();
 })();

@@ -4,12 +4,12 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Library — a minimalist reading dashboard</title>
-<meta name="description" content="A minimalist, static reading dashboard. Build a reading list and browse your Goodreads library, shelved and searchable by Dewey Decimal number, with automatic book covers. Runs entirely in your browser." />
+<meta name="description" content="A minimalist, static reading dashboard. Build a reading list and browse your Goodreads library, shelved and searchable by Dewey Decimal number, with automatic book covers." />
 <meta name="color-scheme" content="light dark" />
 <link rel="icon" href="favicon.svg" type="image/svg+xml" />
 <link rel="preconnect" href="https://covers.openlibrary.org" />
 <link rel="preconnect" href="https://openlibrary.org" />
-<link rel="stylesheet" href="styles.css?v=4" />
+<link rel="stylesheet" href="styles.css?v=5" />
 </head>
 <body>
   <header class="topbar">
@@ -85,14 +85,14 @@
 
   <footer class="foot">
     <span id="footNote"></span>
+    <button id="storeBtn" type="button" class="store-btn">Loading library.md…</button>
   </footer>
 
   <div id="modalHost"></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="data/readinglist.js?v=10"></script>
-  <script src="data/goodreads.js?v=10"></script>
-  <script src="data/dewey.js?v=10"></script>
-  <script src="app.js?v=10"></script>
+  <script src="data/dewey.js?v=11"></script>
+  <script src="store.js?v=11"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>
