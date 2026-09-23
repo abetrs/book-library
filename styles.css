@@ -833,3 +833,56 @@ button.pk-row:hover { background: var(--chip-bg); }
   .pk-num { font-size: 26px; }
   .g-classes small, .g-class > summary small { padding-left: 0; }
 }
+
+/* ---------- storage status (footer) ---------- */
+.foot { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 8px 18px; }
+.store-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+.store-btn:hover { color: var(--ink); border-color: var(--faint); }
+.store-btn.warn { color: #b9770e; border-color: #e0c28a; }
+
+.storage h4 { font-size: 11px; font-weight: 500; letter-spacing: 0.14em; text-transform: uppercase; margin: 20px 0 6px; color: var(--ink); }
+.storage .st-now { font-size: 13.5px; line-height: 1.55; margin: 0 0 10px; }
+.storage .st-err { font-size: 12.5px; color: #c0392b; margin: 0 0 10px; }
+.storage a { color: var(--ink); }
+.storage code, .import-hint code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11px; background: var(--chip-bg); padding: 1px 5px; border-radius: 3px; }
+.st-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+.mform input[type="password"] {
+  display: block; width: 100%; margin-top: 6px; box-sizing: border-box; border: 0;
+  border-bottom: 1px solid var(--faint); background: transparent; color: var(--ink);
+  font-family: inherit; font-size: 14px; padding: 6px 2px; outline: none; border-radius: 0;
+}
+
+/* ---------- add form: ISBN lookup + match picker ---------- */
+.isbn-status {
+  display: flex; gap: 12px; align-items: center;
+  margin: -4px 0 16px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 8px;
+  font-size: 12.5px; line-height: 1.45; color: var(--ink);
+}
+.isbn-status img { width: 34px; height: 51px; object-fit: cover; border-radius: 2px; flex: none; background: var(--card-fallback); }
+.isbn-status .muted, .cand-txt span { color: var(--muted); }
+.cand-list { display: flex; flex-direction: column; border-top: 1px solid var(--line); max-height: 52vh; overflow-y: auto; }
+.cand {
+  appearance: none; display: flex; gap: 14px; align-items: center; width: 100%;
+  border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink);
+  font-family: inherit; text-align: left; padding: 10px 6px; cursor: pointer;
+}
+.cand:hover { background: var(--chip-bg); }
+.cand-cover { width: 34px; height: 51px; flex: none; border-radius: 2px; overflow: hidden; background: var(--card-fallback); }
+.cand-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cand-txt { display: flex; flex-direction: column; gap: 3px; font-size: 13px; line-height: 1.35; }
+.cand-txt span { font-size: 12px; }
+.mform input.bad { border-bottom-color: #c0392b; }
+@media (max-width: 620px) { .st-grid { grid-template-columns: 1fr; } }

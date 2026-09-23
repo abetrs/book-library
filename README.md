@@ -1,14 +1,11 @@
 # Library
 
-A minimalist, static reading dashboard. Keep a curated reading list and browse your Goodreads
-library in one place — shelved by **Dewey Decimal Classification**, searchable by Dewey number,
-subject, author, and read status, with book covers pulled automatically from
-[Open Library](https://openlibrary.org/).
+A minimalist personal reading dashboard. A curated reading list and a Goodreads library in one
+place — shelved by **Dewey Decimal Classification**, searchable by Dewey number, subject, author,
+and read status, with book covers pulled automatically from [Open Library](https://openlibrary.org/).
 
-No accounts, no backend, no tracking. Everything runs in your browser and your data stays on your
-device (in `localStorage`).
-
-**[▶ Live demo](https://YOUR-USERNAME.github.io/book-library/)** — replace with your Pages URL.
+The whole library is stored in **[`library.md`](library.md)** in this repo — a plain Markdown file
+you can read on GitHub and edit by hand.
 
 ## Features
 
@@ -38,19 +35,53 @@ device (in `localStorage`).
 - **DDC guide** — how to read a number, the search syntax, the literature pattern, and the full
   outline of 10 classes / 100 divisions / 1,000 sections with your book counts (click any code).
 - **Drill-down chips:** class → division → section, with counts.
-- **Add or remove books** — click any book for a details popup with a **summary**, genres, its
-  Dewey number, and a delete button.
+- **Add books quickly.** Paste an ISBN and the title and author fill themselves in. Typed a title
+  and author instead? The form checks them against Open Library and Google Books: an exact match is
+  added straight away; otherwise you get **"Did you mean…"** with the real books to pick from, or
+  keep yours as a **custom book** (marked `!custom`, never looked up by title).
+- **Section headers stay headers.** When importing Markdown, `#` headings, bold lines
+  (`**Poetry**`), bold bullets (`- **Poetry**`), bullets ending in a colon (`- Poetry:`), and bullets
+  with nested bullets under them are treated as categories, never as books.
+- **Remove books** — click any book for a details popup with a **summary**, genres, its Dewey
+  number, and a delete button.
 - **Covers** fetched lazily from Open Library and cached locally.
 - **Filters:** author, read/unread status, sort (shelf order, curated, title, author), and a
   grid/list view toggle.
 - **Light & dark** (follows your system), responsive, and fast.
 
-## Run locally
+## Where the library is saved
 
-It's plain HTML/CSS/JS — no build step, no dependencies.
+Everything lives in `library.md`. The footer shows where changes are going; click it for options.
 
-- Double-click `index.html`, **or**
-- serve it: `python -m http.server 8000` then open <http://localhost:8000>.
+- **On your computer:** `node server.js` (no dependencies), then open <http://localhost:8000>.
+  Every change is written straight into `library.md`; commit it whenever you like.
+- **Anywhere (e.g. GitHub Pages):** open the storage dialog and connect GitHub with a
+  [fine-grained token](https://github.com/settings/personal-access-tokens/new) for this repository
+  with **Contents: Read and write**. Each save is committed to `library.md` (edits are batched, so
+  a burst of changes is one commit). The token stays in that browser only.
+- **Otherwise** the app reads `library.md` read-only, and says so in the footer.
+
+Books that older versions kept in browser storage are moved into `library.md` automatically the
+first time the app can save. Covers, genres and summaries are still cached in the browser — they're
+lookups, not data.
+
+### `library.md` format
+
+```markdown
+# Reading List
+
+## Philosophy
+### Stoics
+- Marcus Aurelius — _Meditations_ (Hays translation) ✅ isbn:9780812968255 {188 catalog}
+
+# Goodreads
+
+## Read
+- Frank Herbert — _Dune_ ✅ ★5 isbn:9780441172719 {813.54 catalog}
+```
+
+`✅` read · `!primary` primary source · `!custom` custom book · `★N` rating · `{823.8}` your Dewey
+number · `{… catalog}` from library records · `{… est}` estimated.
 
 ## Use it
 
@@ -72,7 +103,7 @@ Open the **Reading List** tab and paste a Markdown list. Format:
 - `{823.8}` (optional) sets the book's Dewey number yourself.
 
 Or drop a `.md` / `.txt` file. Once you have a list, **Import list** merges more in, skipping
-duplicates. Your list is saved in `localStorage`.
+duplicates. Imported lists use the same format as `library.md`.
 
 ### Goodreads
 On the **Goodreads** tab, import your library export:
@@ -88,11 +119,12 @@ automatically. Re-import any time with **Import CSV** — only new books are add
 
 Because it's fully static, GitHub Pages hosts it for free:
 
-1. Push this repo to GitHub (see below).
+1. Push this repo to GitHub.
 2. On GitHub: **Settings → Pages**.
 3. Under **Build and deployment → Source**, choose **Deploy from a branch**.
 4. Select branch **`main`** and folder **`/ (root)`**, then **Save**.
-5. Wait ~1 minute; your site is live at `https://YOUR-USERNAME.github.io/book-library/`.
+5. Wait ~1 minute; your site is live at `https://abetrs.github.io/book-library/`.
+6. Open it, click the storage button in the footer, and connect GitHub to edit from there.
 
 The included `.nojekyll` file tells Pages to serve the files as-is (no Jekyll processing).
 
@@ -107,7 +139,8 @@ The included `.nojekyll` file tells Pages to serve the files as-is (no Jekyll pr
 - Summaries: Open Library work descriptions, falling back to a Wikipedia search + summary
   (matched on title + author) when Open Library has none.
 - Covers and classification load on separate request queues so lookups never block covers.
-- All state (imported lists, added/removed books, caches) lives in `localStorage`.
+- Data: `library.md`, parsed and written by `store.js`; saved through `server.js` locally or the
+  GitHub contents API. Only caches and the GitHub connection live in `localStorage`.
 
 ## License
 
