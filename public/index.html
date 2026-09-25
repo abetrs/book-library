@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Library — a minimalist reading dashboard</title>
-<meta name="description" content="A minimalist, static reading dashboard. Build a reading list and browse your Goodreads library, shelved and searchable by Dewey Decimal number, with automatic book covers." />
+<title>Library</title>
+<meta name="description" content="A self-hosted personal library. Build a reading list and browse your Goodreads library, shelved and searchable by Dewey Decimal number, with automatic book covers." />
 <meta name="color-scheme" content="light dark" />
-<link rel="icon" href="favicon.svg" type="image/svg+xml" />
-<link rel="preconnect" href="https://covers.openlibrary.org" />
-<link rel="preconnect" href="https://openlibrary.org" />
-<link rel="stylesheet" href="styles.css?v=5" />
+<link rel="icon" href="{{asset:/favicon.svg}}" type="image/svg+xml" />
+<link rel="manifest" href="/manifest.webmanifest" />
+<meta name="theme-color" content="#111111" />
+<link rel="stylesheet" href="{{asset:/styles.css}}" />
 </head>
 <body>
   <header class="topbar">
@@ -85,14 +85,18 @@
 
   <footer class="foot">
     <span id="footNote"></span>
-    <button id="storeBtn" type="button" class="store-btn">Loading library.md…</button>
+    <span id="syncState" class="sync-state" hidden></span>
+    <button id="exportBtn" type="button" class="store-btn" title="Download the whole library as Markdown">Export backup</button>
+    <button id="clearBtn" type="button" class="store-btn danger">Clear library…</button>
+    <button id="logoutBtn" type="button" class="store-btn" hidden>Log out</button>
   </footer>
 
   <div id="modalHost"></div>
   <div id="toast" class="toast" hidden></div>
 
-  <script src="data/dewey.js?v=11"></script>
-  <script src="store.js?v=11"></script>
-  <script src="app.js?v=11"></script>
+  <script src="{{asset:/shared/dewey.js}}"></script>
+  <script src="{{asset:/shared/ddc.js}}"></script>
+  <script src="{{asset:/shared/dedupe.js}}"></script>
+  <script src="{{asset:/app.js}}"></script>
 </body>
 </html>

@@ -1,0 +1,19 @@
+{
+  "name": "book-library",
+  "version": "2.0.0",
+  "private": true,
+  "description": "A self-hosted personal library: reading list + Goodreads, shelved by Dewey Decimal, stored in SQLite.",
+  "license": "MIT",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "test": "node --test test/*.test.js",
+    "backup": "node server/backup.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1"
+  }
+}

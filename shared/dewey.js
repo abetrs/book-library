@@ -3,7 +3,10 @@
 // Used for the shelf order, the class picker, and the in-app DDC guide.
 // Section lists are keyed by division prefix ("00" -> 000–009); an empty string
 // marks a section number that is unassigned / no longer used.
-window.DEWEY = (() => {
+(function (root, factory) {
+  if (typeof module === "object" && module.exports) module.exports = factory();
+  else root.DEWEY = factory();
+})(typeof self !== "undefined" ? self : this, () => {
   const S = {
     "00": ["Computer science, knowledge & systems", "Knowledge", "The book", "Systems", "Data processing & computer science", "Computer programming, programs & data", "Special computer methods", "", "", ""],
     "01": ["Bibliographies", "Bibliographies of individuals", "Bibliographies of works by specific classes of authors", "", "Bibliographies of anonymous & pseudonymous works", "Bibliographies of works from specific places", "Bibliographies of works on specific subjects", "General subject catalogs", "Catalogs arranged by author, main entry, date, etc.", "Dictionary catalogs"],
@@ -158,4 +161,4 @@ window.DEWEY = (() => {
   ];
 
   return { SECTIONS: S, MAIN, BLURB, LIT_FORMS, STD_SUBDIVISIONS };
-})();
+});
